@@ -1,0 +1,61 @@
+---
+title: "tanking"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(hoopR)
+library(rvest)
+library(janitor)
+```
+
+```{r}
+games <- load_nba_team_box(seasons = 2019:2026) |> 
+  mutate(win = ifelse(team_winner, 1, 0),
+         month = month(game_date),
+         late_season = ifelse(month >= 3, 1, 0)
+  )
+team_late_perf <- games |> 
+  filter(late_season == 1) |> 
+  group_by(team_abbreviation, season) |> 
+  summarise(late_win_pct = mean(win), .groups = "drop")
+  
+```
+
+```{r}
+get_draft <- function(year) {
+  url <- paste0("https://www.basketball-reference.com/draft/NBA_", year, ".html")
+  page <- read_html(url)
+  table <- page |> 
+    html_node("table#stats") |> 
+    html_table() |>
+    row_to_names(row_number = 1) |> 
+    clean_names() |> 
+    mutate(
+    pk = as.numeric(pk),
+    g = as.numeric(g),
+    mp = as.numeric(mp),
+    pts = as.numeric(pts),
+    ws = as.numeric(ws)
+  ) |> 
+    filter(!is.na(pk))
+  
+  table$draft_year <- year
+  return(table)
+}
+
+draft_data <- map_dfr(2019:2025, get_draft)
+
+top_picks <- draft_data |> 
+  filter(pk <= 4) |> 
+  select(player, draft_year)
+```
+
+```{r}
+college_stats <- load_mbb_player_box(seasons = 2018:2025)
+college_top <- college_stats
+  filter(!is.na(points)) |> 
+    
+```
