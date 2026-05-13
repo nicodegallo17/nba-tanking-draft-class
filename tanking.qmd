@@ -12,6 +12,8 @@ library(janitor)
 library(chromote)
 library(jsonlite)
 library(httr2)
+library(quantreg)
+library(lme4)
 ```
 
 ```{r}
@@ -20,11 +22,26 @@ games <- load_nba_team_box(seasons = 2019:2026) |>
          month = month(game_date),
          late_season = ifelse(month >= 3, 1, 0)
   )
-team_late_perf <- games |> 
-  filter(late_season == 1) |> 
-  group_by(team_abbreviation, season) |> 
-  summarise(late_win_pct = mean(win), .groups = "drop")
-  
+
+early_team_perf <- games %>%
+  filter(month < 3) %>%
+  group_by(team_abbreviation, season) %>%
+  summarise(
+    early_games = n(),
+    early_wins = sum(win, na.rm = TRUE),
+    early_win_pct = mean(win, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+team_late_perf <- games %>%
+  filter(month >= 3) %>%
+  group_by(team_abbreviation, season) %>%
+  summarise(
+    late_games = n(),
+    late_wins = sum(win, na.rm = TRUE),
+    late_win_pct = mean(win, na.rm = TRUE),
+    .groups = "drop"
+  )
 ```
 
 ```{r}
@@ -50,10 +67,6 @@ get_draft <- function(year) {
 }
 
 draft_data <- map_dfr(2019:2025, get_draft)
-
-top_picks <- draft_data |> 
-  filter(pk <= 4) |> 
-  select(player, draft_year)
 ```
 
 ```{r}
@@ -88,4 +101,52 @@ draft_table <- tibble(line = clean_lines) %>%
     top_prospect_rating = as.numeric(line[which(str_detect(line, "Draft")) + 5]),
     .groups = "drop"
   )
+```
+
+```{r}
+draft_strength <- draft_table %>%
+  transmute(
+    draft_year,
+    avg_rating,
+    elite_count,
+    above_avg_count,
+    top_prospect_rating
+  )
+draft_strength_2019_present <- draft_strength %>%
+  filter(draft_year >= 2019)
+
+team_data <- team_late_perf %>%
+  left_join(early_team_perf, by = c("team_abbreviation", "season")) %>%
+  mutate(
+    draft_year = season + 1,
+    win_pct_change = late_win_pct - early_win_pct,
+    non_contender = ifelse(early_win_pct < 0.400, 1, 0)
+  ) %>%
+  left_join(draft_strength_2019_present, by = "draft_year")
+```
+
+```{r}
+non_con <- team_data |> 
+  filter(non_contender == 1) |> 
+  mutate(tanking = ifelse(win_pct_change < -0.10 & non_contender == 1, 1, 0))
+
+model1 <- lm(win_pct_change ~ avg_rating, data = non_con)
+summary(model1)
+
+model3 <- glm(
+  tanking ~ top_prospect_rating,
+  data = non_con,
+  family = "binomial"
+)
+
+summary(model3)
+
+model_mixed2 <- lmer(
+  win_pct_change ~ avg_rating +
+    (1 | team_abbreviation) +
+    (1 | season),
+  data = team_data
+)
+
+summary(model_mixed2)
 ```
