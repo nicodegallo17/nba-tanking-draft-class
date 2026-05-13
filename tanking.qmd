@@ -9,6 +9,9 @@ library(tidyverse)
 library(hoopR)
 library(rvest)
 library(janitor)
+library(chromote)
+library(jsonlite)
+library(httr2)
 ```
 
 ```{r}
@@ -54,8 +57,35 @@ top_picks <- draft_data |>
 ```
 
 ```{r}
-college_stats <- load_mbb_player_box(seasons = 2018:2025)
-college_top <- college_stats
-  filter(!is.na(points)) |> 
-    
+b <- ChromoteSession$new()
+
+b$Page$navigate("https://craftednba.com/draft/class-rankings")
+Sys.sleep(5)
+
+page_text <- b$Runtime$evaluate(
+  "document.body.innerText"
+)$result$value
+
+cat(page_text)
+
+lines <- str_split(page_text, "\n")[[1]]
+
+clean_lines <- lines %>%
+  str_trim() %>%
+  discard(~ .x == "") %>%
+  keep(~ str_detect(.x, "Draft|prospects analyzed|^[0-9]+\\.?[0-9]*$"))
+
+draft_table <- tibble(line = clean_lines) %>%
+  mutate(group = cumsum(str_detect(line, "20[0-9]{2} Draft"))) %>%
+  filter(group > 0) %>%
+  group_by(group) %>%
+  summarise(
+    draft_year = as.numeric(str_extract(line[str_detect(line, "Draft")], "20[0-9]{2}")),
+    prospects_analyzed = as.numeric(str_extract(line[str_detect(line, "prospects analyzed")], "^[0-9]+")),
+    avg_rating = as.numeric(line[which(str_detect(line, "Draft")) + 2]),
+    elite_count = as.numeric(line[which(str_detect(line, "Draft")) + 3]),
+    above_avg_count = as.numeric(line[which(str_detect(line, "Draft")) + 4]),
+    top_prospect_rating = as.numeric(line[which(str_detect(line, "Draft")) + 5]),
+    .groups = "drop"
+  )
 ```
