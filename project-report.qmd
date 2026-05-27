@@ -124,9 +124,36 @@ team_data <- team_periods |>
 
 ## Dataset Overview
 
-```{r summary-table}
+We mainly use data from two main sources:
+
+1.  **NBA team game logs from hoopR**: regular-season team box scores from the NBA seasons ending in 2019 through 2026. This is done because the lottery odds were changed in the 2019 season.
+2.  **CraftedNBA draft class rankings**: We use their draft-year ratings as an external measure of class strength. Key variables include average class rating, number of elite prospects, number of above-average prospects, and top prospect rating. We don't know entirely how these are modeled, but it allows us to have a consistent measure of draft strength that doesn't have retrospective bias.
+
+We merge these dataframes together (after summarizing the nba data by season and team) to create a team-season dataframe. We then split the data into pre and post march to create a window of time where tanking effects are more likely to appear.
+
+Key variables created for this analysis:
+
+-   `pre_win_pct`: team win percentage before March 1.
+-   `late_win_pct`: team win percentage on or after March 1.
+-   `games_back_10`: games behind the 10th seed in the conference entering March, which approximates distance from the play-in race.
+-   `likely_lottery_candidate`: whether the team was outside the top 10 in its conference and either at least 3 games behind the 10th seed or below a .400 pre-March win percentage.
+-   `tanking_index`: standardized late-season win shortfall. Positive values mean a team won fewer late-season games than expected from its pre-March record.
+-   `tanking_proxy`: a binary flag for likely lottery candidates whose late win percentage dropped by at least 10 percentage points and whose late wins were unusually low under a binomial expectation.
+-   `lower_left_candidate`: a likely lottery team that was below .500 both before March and after March. This captures teams that were consistently weak, even if they did not sharply collapse late in the year.
+-   `late_low_win_score`: a secondary continuous outcome that measures how far below .500 a likely lottery team's late-season win percentage was.
+-   `season_2021`: an indicator for the 2020-21 NBA season, which was shortened to 72 games and affected by COVID-era scheduling, roster, and availability disruptions.
+
+This definition is intentionally conservative. It does not claim to prove intent. It flags team-seasons where the incentive to lose plausibly existed and where late-season performance was meaningfully worse than expected.
+
+## Exploratory Analysis
+
+### Summary Statistics
+
+```{r}
 summary_table <- team_data |>
-  mutate(group = if_else(likely_lottery_candidate, "Likely lottery candidates", "Other teams")) |>
+  mutate(group = if_else(likely_lottery_candidate,
+                         "Likely lottery candidates",
+                         "Other teams")) |>
   group_by(group) |>
   summarise(
     `Team-seasons` = n(),
@@ -141,8 +168,6 @@ summary_table <- team_data |>
 
 kable(summary_table, digits = 3)
 ```
-
-## Exploratory Analysis
 
 ```{r visual-expected-vs-actual, fig.width=8, fig.height=5, fig.cap="Late-season performance compared with pre-March performance."}
 ggplot(team_data, aes(x = pre_win_pct, y = late_win_pct)) +
@@ -174,6 +199,8 @@ ggplot(team_data, aes(x = pre_win_pct, y = late_win_pct)) +
   )
 ```
 
+The visualization compares teams pre march win percentage with their win percentage after march. The graph classifies teams that are likely lottery candidates, meaning they are prime examples of teams that would choose to tank in the latter part of the season. This is done based on win percentage or games-behind playoff contention. Also, the visual separates teams that were bad the whole year vs. ones who were bad and then continued to be worse late in the season.
+
 ```{r visual-draft-strength, fig.width=8, fig.height=5, fig.cap="Draft strength and average late-season underperformance among likely lottery teams."}
 season_summary <- team_data |>
   filter(likely_lottery_candidate) |>
@@ -201,6 +228,12 @@ ggplot(season_summary, aes(x = avg_rating, y = mean_tanking_index)) +
   )
 ```
 
+This graph shows whether out core research question can be answered by the data. The relationship of the draft class rating to the tanking index is positive as we expected, especially considering the amazing draft class of 2026. We also notice an outlier—2021—and will deal with that later (by either controlling for it or removing it).
+
 ## Plan Moving Forward
 
+The NBA flattened the probabilities of teams getting lottery picks in 2019, including the team with the worst overall record dropping from a 25% chance of being selected for the top overall pick to only 14%, so our plan moving forward is to extend our observations of draft classes and teams tanking to include 2010-2018. Furthermore, we are going to run sensitivity checks on the cutoff date of March 1st. The NBA All-Star break is in mid-February, so we will see if there is a change in the effect based on the cutoff date we choose. Currently, the model depends on some arbitrary cutoffs (.400 win proportion before March, being at least 3 games behind the 10th seed), but we should test other definitions of being out of contention. One thing we can do is add games_behind_10 directly into the model, change the threshold around, and estimate a rough play-in probability going into March. Something else we are talking about adding are variables to distinguish tanking from other reasons why a team may perform poorly at the end of a season (injuries/fatigue, harder schedule), which would include adding in player injuries, remaining strength of schedule, and/or changes from the trade deadline. We want to build a model comparing the 2019-2026 data to 2010-2018 and conclude whether or not there was a difference in how incentivized teams have been to tank. A final idea that we are currently looking through is whether or not a linear model even makes sense given the data - there appears to be some curvature in the 2019-2026 data.
+
 ## Anticipated Challenges
+
+Moving forward, we will likely see a few challenges: the 2011-2012 season, similar to the 2021 season, was cut short. It only included 66 games instead of 82, and while this should be enough to compare well to other years, we will still need to check to see if it is a major outlier. Another issue could be large differences in dates of certain events, such as the trade deadline being on different days each year and the all-star break also being on different days, though in general these should lie within the same week annually. In general, the biggest challenge with this project is that tanking isn’t directly observable. To address this, we will describe the outcome as a proxy, include control variables where possible, and test whether the results are robust under multiple definitions. If we were to compare 2019-2026 data to 2010-2018 and use a non-linear approach, we may run into challenges interpreting the differences between the outcomes of the models and giving them any sort of real meaning. 
