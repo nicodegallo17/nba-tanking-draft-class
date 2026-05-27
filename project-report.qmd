@@ -122,6 +122,8 @@ team_data <- team_periods |>
 
 ## Research Question
 
+This project asks: **Do stronger NBA draft classes create stronger incentives for likely lottery teams to underperform late in the regular season?**
+
 While research has been done examining the value for an NBA team to underperform, many focus solely on the benefit of lottery odds, treating the actual players obtainable as a fixed variable. While many articles highlight the increase in tanking, with many different methods of quantifying it (blowout wins, teams underperforming their expected win pct, etc.), they stop short at examining factors like the fixed shift to the flattened lottery curve. We are interested in investigating whether tanking actually significantly fluctuates from season to season as a result of variation in the quality of players entering the league.
 
 ## Dataset Overview
