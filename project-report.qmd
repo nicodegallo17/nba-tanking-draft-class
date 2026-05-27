@@ -232,7 +232,7 @@ ggplot(season_summary, aes(x = avg_rating, y = mean_tanking_index)) +
   )
 ```
 
-This graph shows whether out core research question can be answered by the data. The relationship of the draft class rating to the tanking index is positive as we expected, especially considering the amazing draft class of 2026. We also notice an outlier—2021—and will deal with that later (by either controlling for it or removing it).
+This graph shows whether our core research question can be answered by the data. The relationship of the draft class rating to the tanking index is positive as we expected, especially considering the amazing draft class of 2026. We also notice an outlier—2021—and will deal with that later (by either controlling for it or removing it).
 
 ## Plan Moving Forward
 
