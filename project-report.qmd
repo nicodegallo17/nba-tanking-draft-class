@@ -1,0 +1,206 @@
+---
+title: "project-report"
+format: docx
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+library(tidyverse)
+library(lubridate)
+library(ggrepel)
+library(scales)
+library(knitr)
+
+load(".RData")
+
+theme_set(theme_minimal(base_size = 12))
+```
+
+```{r data-build}
+nba_teams <- c(
+  "ATL", "BOS", "BKN", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GS",
+  "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NO", "NY",
+  "OKC", "ORL", "PHI", "PHX", "POR", "SA", "SAC", "TOR", "UTAH", "WSH"
+)
+
+conference_lookup <- tibble(
+  team_abbreviation = nba_teams,
+  conference = c(
+    "East", "East", "East", "East", "East", "East", "West", "West", "East", "West",
+    "West", "East", "West", "West", "West", "East", "East", "West", "West", "East",
+    "West", "East", "East", "West", "West", "West", "West", "East", "West", "East"
+  )
+)
+
+regular_games <- games |>
+  filter(
+    season_type == 2,
+    team_abbreviation %in% nba_teams,
+    season %in% 2019:2026
+  ) |>
+  mutate(
+    cutoff_date = as.Date(paste0(season, "-03-01")),
+    season_period = if_else(game_date < cutoff_date, "pre_march", "late")
+  ) |>
+  left_join(conference_lookup, by = "team_abbreviation")
+
+team_periods <- regular_games |>
+  group_by(season, team_abbreviation, conference, season_period) |>
+  summarise(
+    games = n(),
+    wins = sum(win, na.rm = TRUE),
+    losses = games - wins,
+    point_diff = mean(team_score - opponent_team_score, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_wider(
+    names_from = season_period,
+    values_from = c(games, wins, losses, point_diff),
+    values_fill = 0
+  )
+
+team_data <- team_periods |>
+  mutate(pre_win_pct = wins_pre_march / games_pre_march) |>
+  group_by(season, conference) |>
+  arrange(desc(pre_win_pct), desc(wins_pre_march), .by_group = TRUE) |>
+  mutate(
+    conference_rank_march = row_number(),
+    seed10_wins = wins_pre_march[10],
+    seed10_losses = losses_pre_march[10],
+    games_back_10 = pmax(
+      0,
+      ((seed10_wins - wins_pre_march) + (losses_pre_march - seed10_losses)) / 2
+    )
+  ) |>
+  ungroup() |>
+  mutate(
+    late_win_pct = wins_late / games_late,
+    expected_late_wins = games_late * pre_win_pct,
+    win_pct_change = late_win_pct - pre_win_pct,
+    expected_sd = sqrt(pmax(games_late * pre_win_pct * (1 - pre_win_pct), 0.001)),
+    late_win_shortfall = expected_late_wins - wins_late,
+    tanking_index = late_win_shortfall / expected_sd,
+    binom_under_p = pmap_dbl(
+      list(wins_late, games_late, pre_win_pct),
+      \(observed_wins, total_games, expected_p) pbinom(observed_wins, total_games, expected_p)
+    ),
+    outside_playin_march = conference_rank_march > 10,
+    likely_lottery_candidate = outside_playin_march &
+      (games_back_10 >= 3 | pre_win_pct < 0.400),
+    tanking_proxy = likely_lottery_candidate &
+      win_pct_change <= -0.10 &
+      binom_under_p <= 0.10,
+    lower_left_candidate = likely_lottery_candidate &
+      pre_win_pct < 0.500 &
+      late_win_pct < 0.500,
+    late_low_win_score = if_else(
+      likely_lottery_candidate,
+      pmax(0, 0.500 - late_win_pct),
+      0
+    ),
+    tanking_signal_group = case_when(
+      tanking_proxy ~ "Late collapse proxy",
+      lower_left_candidate ~ "Sustained low-win signal",
+      TRUE ~ "Other"
+    )
+  ) |>
+  left_join(
+    draft_strength |>
+      select(
+        draft_year,
+        avg_rating,
+        elite_count,
+        above_avg_count,
+        top_prospect_rating
+      ),
+    by = c("season" = "draft_year")
+  )
+```
+
+## Research Question
+
+## Dataset Overview
+
+```{r summary-table}
+summary_table <- team_data |>
+  mutate(group = if_else(likely_lottery_candidate, "Likely lottery candidates", "Other teams")) |>
+  group_by(group) |>
+  summarise(
+    `Team-seasons` = n(),
+    `Avg. pre-March win pct` = mean(pre_win_pct, na.rm = TRUE),
+    `Avg. late win pct` = mean(late_win_pct, na.rm = TRUE),
+    `Avg. win pct change` = mean(win_pct_change, na.rm = TRUE),
+    `Avg. tanking index` = mean(tanking_index, na.rm = TRUE),
+    `Tanking-proxy seasons` = sum(tanking_proxy, na.rm = TRUE),
+    `Lower-left candidate seasons` = sum(lower_left_candidate, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+kable(summary_table, digits = 3)
+```
+
+## Exploratory Analysis
+
+```{r visual-expected-vs-actual, fig.width=8, fig.height=5, fig.cap="Late-season performance compared with pre-March performance."}
+ggplot(team_data, aes(x = pre_win_pct, y = late_win_pct)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  geom_point(aes(color = tanking_signal_group, shape = likely_lottery_candidate), size = 2.8, alpha = 0.80) +
+  geom_text_repel(
+    data = team_data |> filter(tanking_proxy),
+    aes(label = paste(team_abbreviation, season)),
+    size = 3,
+    seed = 470,
+    box.padding = 0.35,
+    min.segment.length = 0
+  ) +
+  scale_x_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+  scale_color_manual(
+    values = c(
+      "Late collapse proxy" = "#C0392B",
+      "Sustained low-win signal" = "#D89135",
+      "Other" = "#355C7D"
+    )
+  ) +
+  labs(
+    title = "Late-season performance compared with pre-March performance",
+    x = "Pre-March win percentage",
+    y = "March-onward win percentage",
+    color = "Signal type",
+    shape = "Likely lottery candidate"
+  )
+```
+
+```{r visual-draft-strength, fig.width=8, fig.height=5, fig.cap="Draft strength and average late-season underperformance among likely lottery teams."}
+season_summary <- team_data |>
+  filter(likely_lottery_candidate) |>
+  group_by(season) |>
+  summarise(
+    avg_rating = first(avg_rating),
+    mean_tanking_index = mean(tanking_index, na.rm = TRUE),
+    proxy_count = sum(tanking_proxy, na.rm = TRUE),
+    candidate_count = n(),
+    .groups = "drop"
+  )
+
+ggplot(season_summary, aes(x = avg_rating, y = mean_tanking_index)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_smooth(method = "lm", se = FALSE, color = "#2F4858", linewidth = 0.8) +
+  geom_point(aes(size = proxy_count, fill = season), shape = 21, color = "white", stroke = 0.8, alpha = 0.9) +
+  geom_text_repel(aes(label = season), size = 3.2, seed = 470, min.segment.length = 0) +
+  scale_fill_gradient(low = "#7FB069", high = "#B23A48", guide = "none") +
+  scale_size_continuous(range = c(3, 8), breaks = 0:4) +
+  labs(
+    title = "Draft strength and late-season underperformance among likely lottery teams",
+    x = "CraftedNBA average draft class rating",
+    y = "Mean tanking index among likely lottery candidates",
+    size = "Proxy seasons"
+  )
+```
+
+## Plan Moving Forward
+
+## Anticipated Challenges
