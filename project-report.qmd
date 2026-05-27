@@ -1,5 +1,5 @@
 ---
-title: "project-report"
+title: "Project Report"
 format: docx
 execute:
   echo: false
