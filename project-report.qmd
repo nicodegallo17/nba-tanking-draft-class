@@ -122,6 +122,8 @@ team_data <- team_periods |>
 
 ## Research Question
 
+While research has been done examining the value for an NBA team to underperform, many focus solely on the benefit of lottery odds, treating the actual players obtainable as a fixed variable. While many articles highlight the increase in tanking, with many different methods of quantifying it (blowout wins, teams underperforming their expected win pct, etc.), they stop short at examining factors like the fixed shift to the flattened lottery curve. We are interested in investigating whether tanking actually significantly fluctuates from season to season as a result of variation in the quality of players entering the league.
+
 ## Dataset Overview
 
 We mainly use data from two main sources:
@@ -199,7 +201,7 @@ ggplot(team_data, aes(x = pre_win_pct, y = late_win_pct)) +
   )
 ```
 
-The visualization compares teams pre march win percentage with their win percentage after march. The graph classifies teams that are likely lottery candidates, meaning they are prime examples of teams that would choose to tank in the latter part of the season. This is done based on win percentage or games-behind playoff contention. Also, the visual separates teams that were bad the whole year vs. ones who were bad and then continued to be worse late in the season.
+The visualization compares teams pre march win percentage with their win percentage after march. The graph classifies teams that are likely lottery candidates, meaning they are prime examples of teams that would choose to tank in the latter part of the season. This is done based on win percentage or games-behind playoff contention. Also, the visual separates teams that were bad the whole year vs. ones who were bad and then continued to be worse late in the season. This is done because we want the model to only consider the late season collapses when determining whether a team decided to tank.
 
 ```{r visual-draft-strength, fig.width=8, fig.height=5, fig.cap="Draft strength and average late-season underperformance among likely lottery teams."}
 season_summary <- team_data |>

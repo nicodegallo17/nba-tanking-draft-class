@@ -1,6 +1,6 @@
 ---
 title: "Draft Class Strength and NBA Tanking Incentives"
-author: "Nicolas Laurenson"
+author: "Nico L, Leo K, Colin C"
 format:
   html:
     toc: true
