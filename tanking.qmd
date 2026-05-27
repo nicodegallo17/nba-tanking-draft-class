@@ -43,6 +43,52 @@ The main exploratory analysis currently uses three data sources:
 2.  **CraftedNBA draft class rankings**: draft-year ratings used as an external measure of class strength. Key variables include average class rating, number of elite prospects, number of above-average prospects, and top prospect rating.
 3.  **Basketball-Reference draft tables**: draft-pick level outcomes such as games played, points, minutes, and win shares. These are useful for validation, though the main exploratory analysis below uses the pre-existing CraftedNBA class ratings to avoid making draft strength entirely dependent on later NBA outcomes.
 
+### Draft Strength Data Collection
+
+The current analysis uses the `draft_strength` object saved in `.RData`. The code below shows how I collected the CraftedNBA draft class rankings. I keep this chunk from running automatically because it depends on a live website and a browser session, but it documents the source of the draft-strength variables used in the model.
+
+```{r craftednba-data-pull, echo=TRUE, eval=FALSE}
+library(chromote)
+
+b <- ChromoteSession$new()
+b$Page$navigate("https://craftednba.com/draft/class-rankings")
+Sys.sleep(5)
+
+page_text <- b$Runtime$evaluate(
+  "document.body.innerText"
+)$result$value
+
+lines <- str_split(page_text, "\n")[[1]]
+
+clean_lines <- lines |>
+  str_trim() |>
+  discard(~ .x == "") |>
+  keep(~ str_detect(.x, "Draft|prospects analyzed|^[0-9]+\\.?[0-9]*$"))
+
+draft_table <- tibble(line = clean_lines) |>
+  mutate(group = cumsum(str_detect(line, "20[0-9]{2} Draft"))) |>
+  filter(group > 0) |>
+  group_by(group) |>
+  summarise(
+    draft_year = as.numeric(str_extract(line[str_detect(line, "Draft")], "20[0-9]{2}")),
+    prospects_analyzed = as.numeric(str_extract(line[str_detect(line, "prospects analyzed")], "^[0-9]+")),
+    avg_rating = as.numeric(line[which(str_detect(line, "Draft")) + 2]),
+    elite_count = as.numeric(line[which(str_detect(line, "Draft")) + 3]),
+    above_avg_count = as.numeric(line[which(str_detect(line, "Draft")) + 4]),
+    top_prospect_rating = as.numeric(line[which(str_detect(line, "Draft")) + 5]),
+    .groups = "drop"
+  )
+
+draft_strength <- draft_table |>
+  transmute(
+    draft_year,
+    avg_rating,
+    elite_count,
+    above_avg_count,
+    top_prospect_rating
+  )
+```
+
 The observational unit for the main analysis is a **team-season**. For each team-season, I split the regular season at March 1. The pre-March portion approximates what was known about team quality before the final stretch of the season, and the March-onward portion is the late-season period where tanking incentives are most likely to appear.
 
 For the final project, I also plan to expand the NBA game-log data backward to include seasons ending in 2010 through 2018. That would allow a direct comparison between the period before the NBA flattened lottery odds and the period after the reform first applied to the 2019 draft.
