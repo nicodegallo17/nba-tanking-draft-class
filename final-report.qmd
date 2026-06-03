@@ -107,9 +107,6 @@ team_data <- team_periods |>
     tanking_proxy = likely_lottery_candidate &
       win_pct_change <= -0.10 &
       binom_under_p <= 0.10,
-    lower_left_candidate = likely_lottery_candidate &
-      pre_win_pct < 0.500 &
-      late_win_pct < 0.500,
     late_collapse_score = if_else(
       likely_lottery_candidate,
       pmax(tanking_index, 0),
@@ -129,7 +126,7 @@ team_data <- team_periods |>
     lottery_era = if_else(post_reform, "Post-reform (2019-2026)", "Pre-reform (2010-2018)"),
     tanking_signal_group = case_when(
       tanking_proxy ~ "Late collapse proxy",
-      lower_left_candidate ~ "Sustained low-win signal",
+      sustained_low_score > 0 ~ "Sustained low-win signal",
       TRUE ~ "Other"
     )
   ) |>
@@ -172,7 +169,6 @@ Key constructed variables:
 -   `likely_lottery_candidate`: a team outside the relevant postseason cutoff that was either at least 3 games behind the cutoff or below a .400 pre-March win percentage.
 -   `tanking_index`: standardized late-season win shortfall. Positive values mean a team won fewer March-onward games than expected from its pre-March record.
 -   `tanking_proxy`: a conservative yes/no flag for likely lottery candidates whose late win percentage dropped by at least 10 percentage points and whose late wins were unusually low under a binomial expectation.
--   `lower_left_candidate`: a likely lottery candidate that was below .500 both before March and after March. This captures teams that remained very weak late in the season, even if they did not sharply collapse.
 -   `late_collapse_score`: a continuous version of the late-collapse signal. It equals the positive part of `tanking_index` for likely lottery candidates, so it captures teams that became worse than expected late in the season.
 -   `sustained_low_score`: a continuous sustained-tanking signal measuring how far below .500 a likely lottery team's late-season win percentage was. This captures teams that stayed very weak late in the season, even if they did not collapse relative to their already-low pre-March baseline.
 -   `season_2012`, `season_2020`, and `season_2021`: separate controls for disrupted seasons. We use separate indicators because the 2012 lockout season, 2020 bubble season, and 2021 shortened COVID-era season may have affected late-season performance in different ways.
@@ -191,7 +187,7 @@ summary_table <- team_data |>
     `Late win pct` = mean(late_win_pct, na.rm = TRUE),
     `Tanking index` = mean(tanking_index, na.rm = TRUE),
     `Late-collapse rate` = mean(tanking_proxy, na.rm = TRUE),
-    `Low-win signal rate` = mean(lower_left_candidate, na.rm = TRUE),
+    `Low-win signal rate` = mean(sustained_low_score > 0, na.rm = TRUE),
     .groups = "drop"
   ) |>
   transmute(
@@ -379,7 +375,7 @@ Figure 4 helps explain why Figure 2 can look counterintuitive. The late-collapse
 
 Our models are limited to likely lottery candidates because those are the teams with the clearest incentive to lose late-season games. To incorporate sustained tanking, we estimate two complementary outcomes. The first is `late_collapse_score`, which captures teams that got worse than expected after March. The second is `sustained_low_score`, which captures teams that stayed far below .500 after March even if they were already weak before March.
 
-In both models, the key coefficient is the standardized draft rating. It asks whether stronger draft classes are associated with larger tanking signals after controlling for distance from the postseason cutoff, pre-March team strength, and separate indicators for the disrupted 2012, 2020, and 2021 seasons.
+In both models, the key coefficient is the standardized draft rating. It asks whether stronger draft classes are associated with larger tanking signals after controlling for pre-March team strength and separate indicators for the disrupted 2012, 2020, and 2021 seasons.
 
 ```{r models}
 candidate_data <- team_data |>
@@ -387,7 +383,6 @@ candidate_data <- team_data |>
 
 model_late_collapse_interaction <- lm(
   late_collapse_score ~ scale(avg_rating) * post_reform +
-    games_back_cutline +
     pre_win_pct +
     season_2012 +
     season_2020 +
@@ -397,7 +392,6 @@ model_late_collapse_interaction <- lm(
 
 model_sustained_low_interaction <- lm(
   sustained_low_score ~ scale(avg_rating) * post_reform +
-    games_back_cutline +
     pre_win_pct +
     season_2012 +
     season_2020 +
@@ -407,7 +401,6 @@ model_sustained_low_interaction <- lm(
 
 model_late_collapse <- lm(
   late_collapse_score ~ scale(avg_rating) +
-    games_back_cutline +
     pre_win_pct +
     season_2012 +
     season_2020 +
@@ -417,7 +410,6 @@ model_late_collapse <- lm(
 
 model_sustained_low <- lm(
   sustained_low_score ~ scale(avg_rating) +
-    games_back_cutline +
     pre_win_pct +
     season_2012 +
     season_2020 +
@@ -430,7 +422,6 @@ candidate_data_no_2021 <- candidate_data |>
 
 model_late_collapse_no_2021 <- lm(
   late_collapse_score ~ scale(avg_rating) +
-    games_back_cutline +
     pre_win_pct +
     season_2012 +
     season_2020,
@@ -439,7 +430,6 @@ model_late_collapse_no_2021 <- lm(
 
 model_sustained_low_no_2021 <- lm(
   sustained_low_score ~ scale(avg_rating) +
-    games_back_cutline +
     pre_win_pct +
     season_2012 +
     season_2020,
@@ -483,7 +473,6 @@ model_table <- bind_rows(
     term = recode(
       term,
       `scale(avg_rating)` = "Draft rating (standardized)",
-      games_back_cutline = "Games behind cutoff",
       pre_win_pct = "Pre-March win pct",
       season_2012TRUE = "2012 season",
       season_2020TRUE = "2020 season",
@@ -512,37 +501,6 @@ control_correlation <- cor(
   candidate_data$games_back_cutline,
   use = "complete.obs"
 )
-
-manual_vif <- function(model) {
-  predictor_matrix <- model.matrix(model)
-  predictor_matrix <- predictor_matrix[, colnames(predictor_matrix) != "(Intercept)", drop = FALSE]
-
-  map_dfr(seq_len(ncol(predictor_matrix)), function(column_index) {
-    focal_predictor <- predictor_matrix[, column_index]
-    other_predictors <- predictor_matrix[, -column_index, drop = FALSE]
-    r_squared <- summary(lm(focal_predictor ~ other_predictors))$r.squared
-
-    tibble(
-      term = colnames(predictor_matrix)[column_index],
-      vif = 1 / (1 - r_squared)
-    )
-  })
-}
-
-vif_table <- manual_vif(model_late_collapse) |>
-  filter(term %in% c("scale(avg_rating)", "games_back_cutline", "pre_win_pct")) |>
-  mutate(
-    term = recode(
-      term,
-      `scale(avg_rating)` = "Draft rating",
-      games_back_cutline = "Games behind cutoff",
-      pre_win_pct = "Pre-March win pct"
-    )
-  )
-
-draft_vif <- vif_table |> filter(term == "Draft rating") |> pull(vif)
-games_back_vif <- vif_table |> filter(term == "Games behind cutoff") |> pull(vif)
-pre_win_vif <- vif_table |> filter(term == "Pre-March win pct") |> pull(vif)
 
 collapse_no_2021_terms <- tidy(model_late_collapse_no_2021)
 sustained_no_2021_terms <- tidy(model_sustained_low_no_2021)
@@ -588,7 +546,7 @@ The interaction models were included because feedback suggested testing whether 
 
 For that reason, our final model pools all seasons together and focuses on the overall relationship between draft strength and the two tanking signals.
 
-We include both `pre_win_pct` and `games_back_cutline` because they control for different parts of a team's March situation. `pre_win_pct` adjusts for baseline team quality, while `games_back_cutline` adjusts for how realistic the team's postseason or play-in chances were. These variables are related: among likely lottery candidates, their correlation is `r round(control_correlation, 3)`. However, the variance inflation factors are moderate rather than severe: `r round(pre_win_vif, 2)` for pre-March win percentage and `r round(games_back_vif, 2)` for games behind the cutoff. Most importantly, the VIF for draft rating is only `r round(draft_vif, 2)`, so multicollinearity between the controls does not appear to threaten the main draft-strength coefficient.
+We considered including both `pre_win_pct` and `games_back_cutline` as model controls, but they are highly correlated among likely lottery candidates, with a correlation of `r round(control_correlation, 3)`. To avoid unnecessary multicollinearity, the final model keeps `pre_win_pct` as the main baseline team-quality control and removes `games_back_cutline` from the regression. `games_back_cutline` still matters in the analysis because it helps define which teams are likely lottery candidates, but it is not included as an additional predictor in the final model.
 
 ```{r final-model-table}
 kable(
