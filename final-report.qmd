@@ -1,0 +1,648 @@
+---
+title: "Draft Class Strength and NBA Tanking Incentives"
+author: "Nico L, Leo K, Colin C"
+format: docx
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+library(tidyverse)
+library(lubridate)
+library(broom)
+library(ggrepel)
+library(scales)
+library(knitr)
+
+load(".RData")
+
+team_box <- if (file.exists("data/nba_team_box_2010_2026.rds")) {
+  readRDS("data/nba_team_box_2010_2026.rds")
+} else {
+  hoopR::load_nba_team_box(seasons = 2010:2026)
+}
+
+theme_set(theme_minimal(base_size = 12))
+```
+
+```{r data-build}
+nba_teams <- c(
+  "ATL", "BOS", "BKN", "NJ", "CHA", "CHI", "CLE", "DAL", "DEN", "DET",
+  "GS", "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NO",
+  "NY", "OKC", "ORL", "PHI", "PHX", "POR", "SA", "SAC", "TOR", "UTAH",
+  "WSH"
+)
+
+conference_lookup <- tibble(
+  team_abbreviation = nba_teams,
+  conference = c(
+    "East", "East", "East", "East", "East", "East", "East", "West", "West", "East",
+    "West", "West", "East", "West", "West", "West", "East", "East", "West", "West",
+    "East", "West", "East", "East", "West", "West", "West", "West", "East", "West",
+    "East"
+  )
+)
+
+regular_games <- team_box |>
+  filter(
+    season_type == 2,
+    team_abbreviation %in% nba_teams,
+    season %in% 2010:2026
+  ) |>
+  mutate(
+    win = team_score > opponent_team_score,
+    cutoff_date = as.Date(paste0(season, "-03-01")),
+    season_period = if_else(game_date < cutoff_date, "pre_march", "late")
+  ) |>
+  left_join(conference_lookup, by = "team_abbreviation")
+
+team_periods <- regular_games |>
+  group_by(season, team_abbreviation, conference, season_period) |>
+  summarise(
+    games = n(),
+    wins = sum(win, na.rm = TRUE),
+    losses = games - wins,
+    point_diff = mean(team_score - opponent_team_score, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_wider(
+    names_from = season_period,
+    values_from = c(games, wins, losses, point_diff),
+    values_fill = 0
+  )
+
+team_data <- team_periods |>
+  mutate(
+    pre_win_pct = wins_pre_march / games_pre_march,
+    postseason_cutline = if_else(season >= 2021, 10L, 8L)
+  ) |>
+  group_by(season, conference) |>
+  arrange(desc(pre_win_pct), desc(wins_pre_march), .by_group = TRUE) |>
+  mutate(
+    conference_rank_march = row_number(),
+    cutline_wins = wins_pre_march[postseason_cutline[1]],
+    cutline_losses = losses_pre_march[postseason_cutline[1]],
+    games_back_cutline = pmax(
+      0,
+      ((cutline_wins - wins_pre_march) + (losses_pre_march - cutline_losses)) / 2
+    )
+  ) |>
+  ungroup() |>
+  mutate(
+    late_win_pct = wins_late / games_late,
+    expected_late_wins = games_late * pre_win_pct,
+    win_pct_change = late_win_pct - pre_win_pct,
+    expected_sd = sqrt(pmax(games_late * pre_win_pct * (1 - pre_win_pct), 0.001)),
+    late_win_shortfall = expected_late_wins - wins_late,
+    tanking_index = late_win_shortfall / expected_sd,
+    binom_under_p = pmap_dbl(
+      list(wins_late, games_late, pre_win_pct),
+      \(observed_wins, total_games, expected_p) pbinom(observed_wins, total_games, expected_p)
+    ),
+    outside_postseason_march = conference_rank_march > postseason_cutline,
+    likely_lottery_candidate = outside_postseason_march &
+      (games_back_cutline >= 3 | pre_win_pct < 0.400),
+    tanking_proxy = likely_lottery_candidate &
+      win_pct_change <= -0.10 &
+      binom_under_p <= 0.10,
+    lower_left_candidate = likely_lottery_candidate &
+      pre_win_pct < 0.500 &
+      late_win_pct < 0.500,
+    late_collapse_score = if_else(
+      likely_lottery_candidate,
+      pmax(tanking_index, 0),
+      0
+    ),
+    sustained_low_score = if_else(
+      likely_lottery_candidate,
+      pmax(0, 0.500 - late_win_pct),
+      0
+    ),
+    late_low_win_score = sustained_low_score,
+    post_reform = season >= 2019,
+    season_2012 = season == 2012,
+    season_2020 = season == 2020,
+    season_2021 = season == 2021,
+    disrupted_season = season %in% c(2012, 2020, 2021),
+    lottery_era = if_else(post_reform, "Post-reform (2019-2026)", "Pre-reform (2010-2018)"),
+    tanking_signal_group = case_when(
+      tanking_proxy ~ "Late collapse proxy",
+      lower_left_candidate ~ "Sustained low-win signal",
+      TRUE ~ "Other"
+    )
+  ) |>
+  left_join(
+    draft_strength |>
+      select(
+        draft_year,
+        avg_rating,
+        elite_count,
+        above_avg_count,
+        top_prospect_rating
+      ),
+    by = c("season" = "draft_year")
+  )
+```
+
+## Research Question
+
+This project asks: **Are stronger NBA draft classes associated with more late-season underperformance among teams with weak playoff outlooks?**
+
+This question is about incentives, but our data cannot directly observe intent. We therefore measure **tanking signals**, not confirmed tanking. A tanking signal is a team-season where a team had a weak postseason outlook entering March and then performed worse than expected late in the regular season. This framing is important because a team can lose late-season games for many reasons, including injuries, player development, fatigue, roster trades, or strategic resting.
+
+Prior research has studied tanking as a response to draft lottery incentives. [Taylor and Trogdon (2002)](https://ideas.repec.org/a/ucp/jlabec/v20y2002i1p23-41.html) and [Price et al. (2010)](https://journals.sagepub.com/doi/10.1177/1527002510363103) examine whether NBA teams lose more often when the reward for losing is larger. Our project builds on that idea by adding a second source of incentive: the quality of the incoming draft class. Instead of treating every draft as equally valuable, we ask whether likely lottery teams appear to underperform more in years when the player pool at the top of the draft is stronger.
+
+The [NBA changed its lottery odds beginning with the 2019 draft](https://www.nba.com/news/nba-board-governors-approves-changes-draft-lottery-system), which is useful background for interpreting the modern seasons. However, the final model below pools all years from 2010 through 2026 rather than estimating separate pre-reform and post-reform effects. This keeps the final model simpler and focuses directly on the relationship between draft class strength and late-season losing signals.
+
+## Dataset
+
+We use two main sources. First, NBA team game logs come from the [`hoopR`](https://hoopr.sportsdataverse.org/) package, which provides team-level NBA game results. These data include the game date, team, opponent, score, and win/loss result. Second, draft class quality comes from [CraftedNBA draft class rankings](https://craftednba.com/draft/class-rankings), which rate draft classes from 2010 through 2026. The main draft-quality variable is `avg_rating`, the average rating of the top 35 prospects in that draft class. We also keep the number of elite prospects, number of above-average prospects, and rating of the top prospect as alternate draft-strength measures.
+
+The final dataset contains `r nrow(team_data)` team-seasons from `r min(team_data$season)` through `r max(team_data$season)`. Each row is one team in one season. Draft quality changes only at the season level, so the analysis has `r n_distinct(team_data$season)` draft-class observations, not `r nrow(team_data)` independent draft-strength observations. This is one of the main limitations of the project and is why we interpret the model results cautiously.
+
+We split each season at March 1. The pre-March portion gives a baseline estimate of team strength before the final stretch of the regular season. The March-onward portion is the window where late-season incentives are more likely to matter.
+
+Key constructed variables:
+
+-   `pre_win_pct`: team win percentage before March 1.
+-   `late_win_pct`: team win percentage on or after March 1.
+-   `games_back_cutline`: games behind the postseason/play-in cutoff entering March. For seasons before the play-in era, the cutoff is the 8th seed. For seasons beginning in 2021, the cutoff is the 10th seed.
+-   `likely_lottery_candidate`: a team outside the relevant postseason cutoff that was either at least 3 games behind the cutoff or below a .400 pre-March win percentage.
+-   `tanking_index`: standardized late-season win shortfall. Positive values mean a team won fewer March-onward games than expected from its pre-March record.
+-   `tanking_proxy`: a conservative yes/no flag for likely lottery candidates whose late win percentage dropped by at least 10 percentage points and whose late wins were unusually low under a binomial expectation.
+-   `lower_left_candidate`: a likely lottery candidate that was below .500 both before March and after March. This captures teams that remained very weak late in the season, even if they did not sharply collapse.
+-   `late_collapse_score`: a continuous version of the late-collapse signal. It equals the positive part of `tanking_index` for likely lottery candidates, so it captures teams that became worse than expected late in the season.
+-   `sustained_low_score`: a continuous sustained-tanking signal measuring how far below .500 a likely lottery team's late-season win percentage was. This captures teams that stayed very weak late in the season, even if they did not collapse relative to their already-low pre-March baseline.
+-   `season_2012`, `season_2020`, and `season_2021`: separate controls for disrupted seasons. We use separate indicators because the 2012 lockout season, 2020 bubble season, and 2021 shortened COVID-era season may have affected late-season performance in different ways.
+
+The `tanking_index` is the main outcome because it uses more information than a simple cutoff. For example, the 2021 Rockets were 11-21 before March, a .344 win percentage. If they had kept winning at that rate over their 40 March-onward games, they would have been expected to win about 13.8 games. They won 6, leaving a shortfall of 7.8 wins and a tanking index of 2.58. This does not prove intent, but it identifies a large late-season underperformance relative to that team's own earlier baseline.
+
+## Exploratory Analysis
+
+```{r summary-table}
+summary_table <- team_data |>
+  mutate(group = if_else(likely_lottery_candidate, "Likely lottery candidates", "Other teams")) |>
+  group_by(lottery_era, group) |>
+  summarise(
+    N = n(),
+    `Pre win pct` = mean(pre_win_pct, na.rm = TRUE),
+    `Late win pct` = mean(late_win_pct, na.rm = TRUE),
+    `Tanking index` = mean(tanking_index, na.rm = TRUE),
+    `Late-collapse rate` = mean(tanking_proxy, na.rm = TRUE),
+    `Low-win signal rate` = mean(lower_left_candidate, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  transmute(
+    Era = lottery_era,
+    Group = group,
+    N,
+    `Pre win pct`,
+    `Late win pct`,
+    `Tanking index`,
+    `Late-collapse rate`,
+    `Low-win signal rate`
+  )
+
+kable(
+  summary_table,
+  digits = 3,
+  caption = "Table 1. Summary statistics by lottery era and team group."
+)
+```
+
+Table 1 shows that likely lottery candidates are much weaker than other teams before March, as expected. The average win percentage change from pre-March to late season is small in both eras, which suggests that most weak teams do not suddenly collapse late in the year. The conservative late-collapse proxy appears in only `r sum(team_data$tanking_proxy)` of `r sum(team_data$likely_lottery_candidate)` likely-candidate seasons, so our binary proxy is intentionally strict. The sustained low-win signal is much more common because many likely lottery teams are bad before March and remain bad afterward.
+
+```{r visual-expected-vs-actual, fig.width=8, fig.height=5, fig.cap="Figure 1. Late-season performance compared with pre-March performance. Each point is one team-season from 2010 through 2026. The dashed line shows equal pre-March and March-onward win percentages. Triangles are likely lottery candidates. Red points are conservative late-collapse proxy seasons, orange points are sustained low-win signal seasons, and blue points are all other team-seasons. Labels identify the largest late-collapse proxy seasons."}
+label_data <- team_data |>
+  filter(tanking_proxy) |>
+  slice_max(tanking_index, n = 12, with_ties = FALSE)
+
+ggplot(team_data, aes(x = pre_win_pct, y = late_win_pct)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  geom_point(
+    aes(color = tanking_signal_group, shape = likely_lottery_candidate),
+    size = 2.4,
+    alpha = 0.72
+  ) +
+  geom_text_repel(
+    data = label_data,
+    aes(label = paste(team_abbreviation, season)),
+    size = 2.8,
+    seed = 470,
+    box.padding = 0.35,
+    min.segment.length = 0
+  ) +
+  scale_x_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+  scale_color_manual(
+    values = c(
+      "Late collapse proxy" = "#C0392B",
+      "Sustained low-win signal" = "#D89135",
+      "Other" = "#355C7D"
+    )
+  ) +
+  labs(
+    title = "Late-season performance compared with pre-March performance",
+    x = "Pre-March win percentage",
+    y = "March-onward win percentage",
+    color = "Signal type",
+    shape = "Likely lottery candidate"
+  )
+```
+
+Figure 1 shows that most teams cluster near the diagonal, meaning their late-season winning percentage was similar to their pre-March winning percentage. The likely lottery candidates mostly appear in the lower-left portion of the graph, which confirms that the candidate definition is identifying weaker teams. The red points are rarer and more extreme: they are teams that were not only bad, but substantially worse late in the season than their earlier record would predict. The orange points address an important weakness of the original binary proxy: some teams do not sharply collapse because they were already near the bottom, but their continued low-win performance may still be relevant to tanking incentives.
+
+```{r visual-draft-strength, fig.width=8, fig.height=5, fig.cap="Figure 2. Draft strength and average late-season underperformance among likely lottery candidates. Each point is one NBA season. The x-axis is the CraftedNBA average draft class rating, the y-axis is the mean tanking index among likely lottery candidates, and point size is the number of conservative late-collapse proxy team-seasons in that year. Fitted lines are descriptive and are shown separately for the pre-reform and post-reform lottery eras."}
+season_summary <- team_data |>
+  filter(likely_lottery_candidate) |>
+  group_by(season, lottery_era) |>
+  summarise(
+    avg_rating = first(avg_rating),
+    mean_tanking_index = mean(tanking_index, na.rm = TRUE),
+    proxy_count = sum(tanking_proxy, na.rm = TRUE),
+    candidate_count = n(),
+    .groups = "drop"
+  )
+
+ggplot(season_summary, aes(x = avg_rating, y = mean_tanking_index, color = lottery_era)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.8) +
+  geom_point(aes(size = proxy_count), alpha = 0.85) +
+  geom_text_repel(aes(label = season), size = 2.9, seed = 470, min.segment.length = 0) +
+  scale_color_manual(
+    values = c(
+      "Pre-reform (2010-2018)" = "#5D6D7E",
+      "Post-reform (2019-2026)" = "#B23A48"
+    )
+  ) +
+  scale_size_continuous(range = c(2.8, 7.5), breaks = 0:5) +
+  labs(
+    title = "Draft strength and late-season underperformance among likely lottery teams",
+    x = "CraftedNBA average draft class rating",
+    y = "Mean tanking index among likely lottery candidates",
+    color = "Lottery era",
+    size = "Late-collapse proxy seasons"
+  )
+```
+
+Figure 2 provides exploratory context rather than the final model specification. The pre-reform and post-reform fitted lines are shown descriptively, but the final regression below pools all years together. The graph still shows why the conclusion should be cautious: there are only 17 season-level draft class observations, and 2021 remains unusual because it was affected by COVID-era scheduling and roster disruptions.
+
+Although the model uses team-season observations, Figure 2 summarizes outcomes at the season level because draft strength is constant for all teams in a given draft year. Figure 3 shows the same draft-strength relationship using all likely lottery team-seasons.
+
+```{r visual-team-season-observations, fig.width=8, fig.height=5.4, fig.cap="Figure 3. Team-season observations for draft strength and late-season underperformance among likely lottery candidates. Each point is one likely lottery team-season. The x-axis is jittered slightly because every team in the same season has the same draft class rating. Color shows season, shape shows lottery era, and the black diamonds show the season-level averages from Figure 2."}
+candidate_plot_data <- team_data |>
+  filter(likely_lottery_candidate) |>
+  mutate(label = if_else(tanking_index >= quantile(tanking_index, 0.94, na.rm = TRUE),
+                         paste(team_abbreviation, season),
+                         NA_character_))
+
+ggplot(candidate_plot_data, aes(x = avg_rating, y = tanking_index)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray55") +
+  geom_jitter(
+    aes(color = season, shape = lottery_era),
+    width = 0.12,
+    height = 0,
+    size = 2.1,
+    alpha = 0.68
+  ) +
+  geom_point(
+    data = season_summary,
+    aes(x = avg_rating, y = mean_tanking_index),
+    inherit.aes = FALSE,
+    shape = 23,
+    fill = "black",
+    color = "white",
+    size = 3.2,
+    alpha = 0.9
+  ) +
+  geom_text_repel(
+    aes(label = label),
+    na.rm = TRUE,
+    size = 2.7,
+    seed = 470,
+    box.padding = 0.35,
+    min.segment.length = 0
+  ) +
+  scale_color_viridis_c(option = "plasma", breaks = seq(2010, 2026, by = 4)) +
+  labs(
+    title = "Team-season tanking index observations by draft strength",
+    x = "CraftedNBA average draft class rating",
+    y = "Tanking index",
+    color = "Season",
+    shape = "Lottery era"
+  )
+```
+
+Figure 3 makes the observational unit clearer. Each point is a team-season, while the black diamonds are the season averages used in Figure 2. The vertical stacks show why the season-level summary can hide variation: teams in the same draft year share the same draft rating, but their tanking-index values differ widely.
+
+```{r visual-two-signals, fig.width=8, fig.height=5.4, fig.cap="Figure 4. Draft strength compared with two tanking-signal outcomes among likely lottery candidates. The late-collapse panel measures whether teams became worse than expected after March. The sustained-low panel measures whether likely lottery teams remained far below .500 after March, even if they were already weak before March. Each point is one season, and fitted lines are descriptive."}
+signal_summary <- team_data |>
+  filter(likely_lottery_candidate) |>
+  group_by(season, lottery_era) |>
+  summarise(
+    avg_rating = first(avg_rating),
+    `Late-collapse score` = mean(late_collapse_score, na.rm = TRUE),
+    `Sustained-low score` = mean(sustained_low_score, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_longer(
+    cols = c(`Late-collapse score`, `Sustained-low score`),
+    names_to = "signal_type",
+    values_to = "mean_score"
+  )
+
+ggplot(signal_summary, aes(x = avg_rating, y = mean_score, color = lottery_era)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.8) +
+  geom_point(size = 2.6, alpha = 0.85) +
+  geom_text_repel(aes(label = season), size = 2.7, seed = 470, min.segment.length = 0) +
+  facet_wrap(~signal_type, scales = "free_y") +
+  scale_color_manual(
+    values = c(
+      "Pre-reform (2010-2018)" = "#5D6D7E",
+      "Post-reform (2019-2026)" = "#B23A48"
+    )
+  ) +
+  labs(
+    title = "Two tanking signals by draft strength",
+    x = "CraftedNBA average draft class rating",
+    y = "Mean signal score among likely lottery candidates",
+    color = "Lottery era"
+  )
+```
+
+Figure 4 helps explain why Figure 2 can look counterintuitive. The late-collapse outcome only detects teams that got worse after March relative to their own earlier baseline. If a team was already losing heavily before March, it may not register as a late collapse. The sustained-low outcome captures that second pattern by asking whether likely lottery teams remained far below .500 late in the season. The evidence is still limited, but the two-signal version better matches the basketball story than a single late-collapse measure.
+
+## Modeling Results
+
+Our models are limited to likely lottery candidates because those are the teams with the clearest incentive to lose late-season games. To incorporate sustained tanking, we estimate two complementary outcomes. The first is `late_collapse_score`, which captures teams that got worse than expected after March. The second is `sustained_low_score`, which captures teams that stayed far below .500 after March even if they were already weak before March.
+
+In both models, the key coefficient is the standardized draft rating. It asks whether stronger draft classes are associated with larger tanking signals after controlling for distance from the postseason cutoff, pre-March team strength, and separate indicators for the disrupted 2012, 2020, and 2021 seasons.
+
+```{r models}
+candidate_data <- team_data |>
+  filter(likely_lottery_candidate)
+
+model_late_collapse_interaction <- lm(
+  late_collapse_score ~ scale(avg_rating) * post_reform +
+    games_back_cutline +
+    pre_win_pct +
+    season_2012 +
+    season_2020 +
+    season_2021,
+  data = candidate_data
+)
+
+model_sustained_low_interaction <- lm(
+  sustained_low_score ~ scale(avg_rating) * post_reform +
+    games_back_cutline +
+    pre_win_pct +
+    season_2012 +
+    season_2020 +
+    season_2021,
+  data = candidate_data
+)
+
+model_late_collapse <- lm(
+  late_collapse_score ~ scale(avg_rating) +
+    games_back_cutline +
+    pre_win_pct +
+    season_2012 +
+    season_2020 +
+    season_2021,
+  data = candidate_data
+)
+
+model_sustained_low <- lm(
+  sustained_low_score ~ scale(avg_rating) +
+    games_back_cutline +
+    pre_win_pct +
+    season_2012 +
+    season_2020 +
+    season_2021,
+  data = candidate_data
+)
+
+candidate_data_no_2021 <- candidate_data |>
+  filter(season != 2021)
+
+model_late_collapse_no_2021 <- lm(
+  late_collapse_score ~ scale(avg_rating) +
+    games_back_cutline +
+    pre_win_pct +
+    season_2012 +
+    season_2020,
+  data = candidate_data_no_2021
+)
+
+model_sustained_low_no_2021 <- lm(
+  sustained_low_score ~ scale(avg_rating) +
+    games_back_cutline +
+    pre_win_pct +
+    season_2012 +
+    season_2020,
+  data = candidate_data_no_2021
+)
+
+interaction_table <- bind_rows(
+  tidy(model_late_collapse_interaction) |>
+    mutate(Outcome = "Late-collapse"),
+  tidy(model_sustained_low_interaction) |>
+    mutate(Outcome = "Sustained-low")
+) |>
+  filter(term %in% c(
+    "scale(avg_rating)",
+    "post_reformTRUE",
+    "scale(avg_rating):post_reformTRUE"
+  )) |>
+  mutate(
+    term = recode(
+      term,
+      `scale(avg_rating)` = "Draft rating",
+      post_reformTRUE = "Post-2019 reform",
+      `scale(avg_rating):post_reformTRUE` = "Draft rating x post-2019"
+    )
+  ) |>
+  select(
+    Outcome,
+    Term = term,
+    Estimate = estimate,
+    `p-value` = p.value
+  )
+
+model_table <- bind_rows(
+  tidy(model_late_collapse) |>
+    mutate(Model = "Late-collapse score"),
+  tidy(model_sustained_low) |>
+    mutate(Model = "Sustained-low score")
+) |>
+  filter(term != "(Intercept)") |>
+  mutate(
+    term = recode(
+      term,
+      `scale(avg_rating)` = "Draft rating (standardized)",
+      games_back_cutline = "Games behind cutoff",
+      pre_win_pct = "Pre-March win pct",
+      season_2012TRUE = "2012 season",
+      season_2020TRUE = "2020 season",
+      season_2021TRUE = "2021 season"
+    )
+  ) |>
+  select(
+    Model,
+    Term = term,
+    Estimate = estimate,
+    `Std. error` = std.error,
+    `p-value` = p.value
+  )
+
+collapse_terms <- tidy(model_late_collapse)
+sustained_terms <- tidy(model_sustained_low)
+
+collapse_draft_est <- collapse_terms |> filter(term == "scale(avg_rating)") |> pull(estimate)
+collapse_draft_p <- collapse_terms |> filter(term == "scale(avg_rating)") |> pull(p.value)
+
+sustained_draft_est <- sustained_terms |> filter(term == "scale(avg_rating)") |> pull(estimate)
+sustained_draft_p <- sustained_terms |> filter(term == "scale(avg_rating)") |> pull(p.value)
+
+control_correlation <- cor(
+  candidate_data$pre_win_pct,
+  candidate_data$games_back_cutline,
+  use = "complete.obs"
+)
+
+manual_vif <- function(model) {
+  predictor_matrix <- model.matrix(model)
+  predictor_matrix <- predictor_matrix[, colnames(predictor_matrix) != "(Intercept)", drop = FALSE]
+
+  map_dfr(seq_len(ncol(predictor_matrix)), function(column_index) {
+    focal_predictor <- predictor_matrix[, column_index]
+    other_predictors <- predictor_matrix[, -column_index, drop = FALSE]
+    r_squared <- summary(lm(focal_predictor ~ other_predictors))$r.squared
+
+    tibble(
+      term = colnames(predictor_matrix)[column_index],
+      vif = 1 / (1 - r_squared)
+    )
+  })
+}
+
+vif_table <- manual_vif(model_late_collapse) |>
+  filter(term %in% c("scale(avg_rating)", "games_back_cutline", "pre_win_pct")) |>
+  mutate(
+    term = recode(
+      term,
+      `scale(avg_rating)` = "Draft rating",
+      games_back_cutline = "Games behind cutoff",
+      pre_win_pct = "Pre-March win pct"
+    )
+  )
+
+draft_vif <- vif_table |> filter(term == "Draft rating") |> pull(vif)
+games_back_vif <- vif_table |> filter(term == "Games behind cutoff") |> pull(vif)
+pre_win_vif <- vif_table |> filter(term == "Pre-March win pct") |> pull(vif)
+
+collapse_no_2021_terms <- tidy(model_late_collapse_no_2021)
+sustained_no_2021_terms <- tidy(model_sustained_low_no_2021)
+
+collapse_no_2021_draft_est <- collapse_no_2021_terms |> filter(term == "scale(avg_rating)") |> pull(estimate)
+collapse_no_2021_draft_p <- collapse_no_2021_terms |> filter(term == "scale(avg_rating)") |> pull(p.value)
+sustained_no_2021_draft_est <- sustained_no_2021_terms |> filter(term == "scale(avg_rating)") |> pull(estimate)
+sustained_no_2021_draft_p <- sustained_no_2021_terms |> filter(term == "scale(avg_rating)") |> pull(p.value)
+
+sensitivity_table <- bind_rows(
+  tidy(model_late_collapse) |>
+    mutate(Outcome = "Late-collapse", Sample = "All years"),
+  tidy(model_late_collapse_no_2021) |>
+    mutate(Outcome = "Late-collapse", Sample = "Excluding 2021"),
+  tidy(model_sustained_low) |>
+    mutate(Outcome = "Sustained-low", Sample = "All years"),
+  tidy(model_sustained_low_no_2021) |>
+    mutate(Outcome = "Sustained-low", Sample = "Excluding 2021")
+) |>
+  filter(term == "scale(avg_rating)") |>
+  mutate(
+    term = "Draft rating (standardized)",
+    Sample = factor(Sample, levels = c("All years", "Excluding 2021")),
+    Outcome = factor(Outcome, levels = c("Late-collapse", "Sustained-low"))
+  ) |>
+  arrange(Outcome, Sample, term) |>
+  select(
+    Outcome,
+    Sample,
+    Term = term,
+    Estimate = estimate,
+    `p-value` = p.value
+  )
+
+kable(
+  interaction_table,
+  digits = 3,
+  caption = "Table 2. Exploratory pre/post lottery reform interaction models."
+)
+```
+
+The interaction models were included because feedback suggested testing whether the relationship between draft strength and tanking signals changed after the 2019 lottery reform. They are useful as an exploratory check, but they are not our preferred final model. With only 17 draft-class seasons, splitting the draft-strength effect into pre- and post-reform components makes the model harder to estimate and easier for individual seasons to influence.
+
+For that reason, our final model pools all seasons together and focuses on the overall relationship between draft strength and the two tanking signals.
+
+We include both `pre_win_pct` and `games_back_cutline` because they control for different parts of a team's March situation. `pre_win_pct` adjusts for baseline team quality, while `games_back_cutline` adjusts for how realistic the team's postseason or play-in chances were. These variables are related: among likely lottery candidates, their correlation is `r round(control_correlation, 3)`. However, the variance inflation factors are moderate rather than severe: `r round(pre_win_vif, 2)` for pre-March win percentage and `r round(games_back_vif, 2)` for games behind the cutoff. Most importantly, the VIF for draft rating is only `r round(draft_vif, 2)`, so multicollinearity between the controls does not appear to threaten the main draft-strength coefficient.
+
+```{r final-model-table}
+kable(
+  model_table,
+  digits = 3,
+  caption = "Table 3. Final pooled regression models for late-collapse and sustained-low signals among likely lottery candidates."
+)
+```
+
+The late-collapse model does not provide strong statistical evidence that draft strength predicts sudden March-onward underperformance across the full 2010-2026 period. Its draft-rating coefficient is `r round(collapse_draft_est, 3)`, with a p-value of `r format.pval(collapse_draft_p, digits = 2)`. This means a one-standard-deviation increase in draft class rating is associated with an estimated `r round(collapse_draft_est, 3)` increase in the late-collapse score, holding the other variables constant.
+
+The sustained-low model tells a similar but slightly more intuitive story. Its draft-rating coefficient is `r round(sustained_draft_est, 3)`, with a p-value of `r format.pval(sustained_draft_p, digits = 2)`. Overall, the results support a cautious conclusion: stronger draft classes may be associated with more late-season losing signals, especially when we include sustained poor performance, but the evidence is suggestive rather than conclusive.
+
+Because 2021 is visibly unusual in the exploratory graphs, we also refit the same all-years models after removing only the 2021 season. This is a sensitivity check, not a replacement for the main model. The main model uses all available years from 2010 through 2026, while the sensitivity model asks whether the conclusion depends heavily on one COVID-affected season.
+
+```{r no-2021-sensitivity}
+kable(
+  sensitivity_table,
+  digits = 3,
+  caption = "Table 4. Sensitivity check comparing final pooled models with models excluding 2021."
+)
+```
+
+Excluding 2021 produces very similar results. In the late-collapse model, the draft-rating coefficient changes from `r round(collapse_draft_est, 3)` in the all-years model to `r round(collapse_no_2021_draft_est, 3)` after excluding 2021, with the p-value changing from `r format.pval(collapse_draft_p, digits = 2)` to `r format.pval(collapse_no_2021_draft_p, digits = 2)`. In the sustained-low model, the draft-rating coefficient changes from `r round(sustained_draft_est, 3)` to `r round(sustained_no_2021_draft_est, 3)`, with the p-value changing from `r format.pval(sustained_draft_p, digits = 2)` to `r format.pval(sustained_no_2021_draft_p, digits = 2)`. This suggests that the results are not being driven only by 2021. The separate season controls in the main model appear to account for much of the unusual behavior in disrupted seasons while still keeping all years in the primary analysis.
+
+## Discussion
+
+The main finding is that draft strength has a positive relationship with late-season losing signals among likely lottery candidates. In the full pooled model with separate controls for 2012, 2020, and 2021, draft rating is statistically significant for the late-collapse outcome and borderline for the sustained-low outcome. The sensitivity model excluding 2021 gives nearly the same result. This does not prove that teams definitely tank more in strong draft years, but it does suggest that draft class quality is related to late-season losing behavior once disrupted seasons are handled carefully.
+
+The analysis also shows why the definition of tanking matters. A strict late-collapse proxy flags only a small number of team-seasons. That makes the proxy conservative, but it can miss teams that were already very weak and remained very weak. The sustained-low score helps address this by capturing teams that stayed bad late in the season, even if they did not sharply decline after March. For the final interpretation, we should treat late collapse and sustained low performance as complementary signals rather than competing definitions.
+
+The 2021 season remains an important case. Several teams underperformed sharply late in the season, but that year was shortened and affected by COVID-era scheduling and player availability. Rather than deleting 2021 from the main model, we include a separate 2021 control. We also include separate controls for 2012 and 2020 because those seasons were disrupted in different ways. This keeps the observations in the main analysis while acknowledging that they may not be comparable to normal 82-game seasons.
+
+## Limitations and Future Work
+
+The biggest limitation is that tanking is not directly observable. We can observe losses, late-season underperformance, and playoff context, but we cannot observe whether a front office intended to lose. For that reason, all outcomes in this report should be interpreted as tanking proxies or tanking signals.
+
+A second limitation is that draft strength varies by season, not by team. Even after expanding the data to 2010-2026, there are only 17 draft-class observations. The team-season structure gives us more information about which teams were in position to tank, but it does not create 510 independent draft-strength observations.
+
+A third limitation is that our current model does not directly measure player resting. One peer-review suggestion was to add a variable for whether teams benched starters or reduced minutes for their best players late in the season. That would be a strong addition. A practical version would use player game logs to identify each team's top pre-March minute players, then measure whether those players' minutes or games played dropped sharply after March. This would help separate strategic late-season roster management from ordinary losing.
+
+Finally, the CraftedNBA rating is useful because it gives one consistent external measure of draft class quality, but it is still one source's model-based ranking. Future versions should test whether results change when draft strength is measured by top-prospect rating, number of elite prospects, consensus mock draft rankings, or later NBA outcomes such as win shares.
+
+## Conclusion
+
+This project finds evidence that draft class strength is positively associated with late-season losing signals among likely lottery candidates. In the final pooled model with separate disrupted-season controls, draft rating is statistically significant for late-collapse behavior and borderline significant for sustained-low behavior. The sensitivity model excluding the unusual 2021 season gives a similar result. The strongest visual evidence comes from seasons such as 2025 and 2026, where strong draft classes line up with higher late-collapse and sustained-low scores.
+
+The most defensible conclusion is therefore cautious but clearer than before: draft class quality appears relevant to tanking incentives, especially when disrupted seasons are controlled separately. The project improves on simpler tanking analyses by combining playoff context, late-collapse behavior, sustained low late-season performance, and draft class quality into one framework.
+
+## References
+
+-   CraftedNBA. [Draft Class Rankings](https://craftednba.com/draft/class-rankings).
+-   hoopR. [SportsDataverse hoopR package](https://hoopr.sportsdataverse.org/).
+-   NBA.com. [NBA Board of Governors approves changes to Draft Lottery system](https://www.nba.com/news/nba-board-governors-approves-changes-draft-lottery-system).
+-   NBA.com. [NBA Draft Lottery explainer](https://www.nba.com/news/nba-draft-lottery-explainer?lv=true).
+-   Price, J., Soebbing, B. P., Berri, D., & Humphreys, B. R. (2010). [Tournament Incentives, League Policy, and NBA Team Performance Revisited](https://journals.sagepub.com/doi/10.1177/1527002510363103).
+-   Taylor, B. A., & Trogdon, J. G. (2002). [Losing to Win: Tournament Incentives in the National Basketball Association](https://ideas.repec.org/a/ucp/jlabec/v20y2002i1p23-41.html).
