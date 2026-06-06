@@ -16,8 +16,6 @@ library(ggrepel)
 library(scales)
 library(knitr)
 
-load(".RData")
-
 team_box <- if (file.exists("data/nba_team_box_2010_2026.rds")) {
   readRDS("data/nba_team_box_2010_2026.rds")
 } else {
@@ -32,6 +30,11 @@ player_box <- if (file.exists("data/nba_player_box_2010_2026.rds")) {
 
 draft_prospects <- read_csv(
   "data/crafted_prospects_2010_2026.csv",
+  show_col_types = FALSE
+)
+
+draft_strength <- read_csv(
+  "data/crafted_draft_strength_2010_2026.csv",
   show_col_types = FALSE
 )
 
