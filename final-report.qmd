@@ -313,13 +313,84 @@ team_fit_scores <- team_position_need |>
     .groups = "drop"
   )
 
+player_usage <- player_box |>
+  filter(
+    season_type == 2,
+    season %in% 2010:2026,
+    team_abbreviation %in% nba_teams
+  ) |>
+  mutate(
+    cutoff_date = as.Date(paste0(season, "-03-01")),
+    season_period = if_else(game_date < cutoff_date, "pre_march", "late"),
+    minutes_num = suppressWarnings(as.numeric(minutes)),
+    minutes_played = replace_na(minutes_num, 0),
+    starter_flag = starter %in% TRUE
+  )
+
+team_games <- regular_games |>
+  distinct(season, team_abbreviation, game_id, game_date, season_period)
+
+late_core_appearances <- player_usage |>
+  filter(season_period == "late", minutes_played > 0) |>
+  distinct(season, team_abbreviation, athlete_id)
+
+core_players <- player_usage |>
+  filter(season_period == "pre_march", minutes_played > 0) |>
+  group_by(season, team_abbreviation, athlete_id, athlete_display_name) |>
+  summarise(
+    pre_starts = sum(starter_flag, na.rm = TRUE),
+    pre_minutes = sum(minutes_played, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  group_by(season, team_abbreviation) |>
+  arrange(desc(pre_starts), desc(pre_minutes), .by_group = TRUE) |>
+  slice_head(n = 3) |>
+  ungroup() |>
+  semi_join(
+    late_core_appearances,
+    by = c("season", "team_abbreviation", "athlete_id")
+  )
+
+core_usage <- core_players |>
+  select(season, team_abbreviation, athlete_id) |>
+  inner_join(
+    team_games,
+    by = c("season", "team_abbreviation"),
+    relationship = "many-to-many"
+  ) |>
+  left_join(
+    player_usage |>
+      select(season, team_abbreviation, game_id, athlete_id, minutes_played),
+    by = c("season", "team_abbreviation", "game_id", "athlete_id")
+  ) |>
+  mutate(minutes_played = replace_na(minutes_played, 0)) |>
+  group_by(season, team_abbreviation, season_period) |>
+  summarise(
+    core_minutes_per_game = sum(minutes_played, na.rm = TRUE) / n_distinct(game_id),
+    .groups = "drop"
+  ) |>
+  pivot_wider(
+    names_from = season_period,
+    values_from = core_minutes_per_game,
+    names_prefix = "core_mpg_"
+  ) |>
+  mutate(
+    core_usage_drop = core_mpg_pre_march - core_mpg_late,
+    core_usage_drop_rate = if_else(
+      core_mpg_pre_march > 0,
+      core_usage_drop / core_mpg_pre_march,
+      NA_real_
+    )
+  )
+
 team_data <- team_data |>
-  left_join(team_fit_scores, by = c("season", "team_abbreviation"))
+  left_join(team_fit_scores, by = c("season", "team_abbreviation")) |>
+  left_join(core_usage, by = c("season", "team_abbreviation"))
 ```
 
 ## Abstract
 
-This project studies whether stronger NBA draft classes are associated with more late-season underperformance among teams with weak playoff outlooks. Using NBA team game logs from 2010 through 2026 and CraftedNBA draft prospect ratings, we build a team-season dataset that compares each team's performance before March 1 to its performance after March 1. As the project developed, we moved away from a simple binary definition of tanking and instead used a standardized `tanking_index`, which measures how many fewer games a team won late in the season than expected from its pre-March record. We also changed the draft-strength measure from a broad top-35 average to the average rating of the top four prospects, because lottery incentives are most directly tied to access to the top of the draft. The main result is suggestive rather than conclusive: likely lottery teams with larger position-adjusted draft incentives tend to have larger late-season win shortfalls, but the evidence is limited by the fact that draft quality varies mostly by season and tanking intent is not directly observable.
+This project studies whether stronger NBA draft classes are associated with more late-season underperformance among teams with weak playoff outlooks. Using NBA team and player game logs from 2010 through 2026 and CraftedNBA draft prospect ratings, we build a team-season dataset that compares each team's performance before March 1 to its performance after March 1. As the project developed, we moved away from a simple binary definition of tanking and instead used a standardized `tanking_index`, which measures how many fewer games a team won late in the season than expected from its pre-March record. We also changed the draft-strength measure from a broad top-35 average to the average rating of the top four prospects, because lottery incentives are most directly tied to access to the top of the draft. The main win-loss result is suggestive rather than conclusive: likely lottery teams with larger position-adjusted draft incentives tend to have larger late-season win shortfalls, but the evidence is limited by the fact that draft quality varies mostly by season and tanking intent is not directly observable. A fourth exploratory analysis finds a stronger relationship between top-four draft strength and reduced late-season minutes for continuing core players, which points to roster management as a useful follow-up tanking signal.
 
 ## I. Introduction
 
@@ -359,6 +430,7 @@ Key constructed variables:
 -   `tanking_proxy`: a conservative yes/no flag for likely lottery candidates whose late win percentage dropped by at least 10 percentage points and whose late wins were unusually low under a binomial expectation.
 -   `late_collapse_score`: a positive-only version of the late-collapse signal. It equals the positive part of `tanking_index` for likely lottery candidates. We use it descriptively, but the final regression uses the full `tanking_index` because the full index keeps overperformance as negative evidence instead of turning it into zero.
 -   `team_fit_score`: an exploratory measure of whether a team's pre-March positional weaknesses line up with the strongest positions in that draft class. We group both teams and prospects into guards, wings, and bigs. A team gets a higher fit score when its weakest pre-March position groups match the position groups where the draft class has more high-rated prospects.
+-   `core_usage_drop_rate`: an exploratory roster-management outcome. We identify each team's top three pre-March core players using starts and minutes, keep only players who appeared for the same team after March 1, and measure the percentage drop in their combined minutes per team game after March 1.
 -   `season_2012`, `season_2020`, and `season_2021`: separate controls for disrupted seasons. We use separate indicators because the 2012 lockout season, 2020 bubble season, and 2021 shortened COVID-era season may have affected late-season performance in different ways.
 
 The `tanking_index` is the main outcome because it uses more information than a simple cutoff. For example, the 2021 Rockets were 11-21 before March, a .344 win percentage. If they had kept winning at that rate over their 40 March-onward games, they would have been expected to win about 13.8 games. They won 6, leaving a shortfall of 7.8 wins and a tanking index of 2.58. This does not prove intent, but it identifies a large late-season underperformance relative to that team's own earlier baseline.
@@ -591,7 +663,9 @@ Figure 5 directly addresses the concern that a draft class has the same top-four
 
 The formal analysis uses likely lottery candidates only, because those are the teams with the clearest incentive to lose late-season games. To avoid making the results depend on an arbitrary 10 percentage point cutoff, the outcome is the full `tanking_index`. This is a standardized late-season win shortfall: positive values mean a team won fewer March-onward games than expected from its pre-March record, while negative values mean it overperformed late.
 
-The final model's key coefficient is the standardized position-adjusted draft incentive. It asks whether teams with larger marginal lottery rewards in stronger top-four draft classes have larger tanking signals after controlling for pre-March team strength and separate indicators for the disrupted 2012, 2020, and 2021 seasons. We also include two follow-up checks: whether the relationship changed after the 2019 lottery reform, and whether a team's roster fit with the draft class adds explanatory power.
+All formal regression models in this section use **team-season observations**, not one observation per season. In other words, a team like Houston in 2021 and Orlando in 2021 are separate observations because they had different pre-March records, lottery positions, marginal lottery incentives, and late-season outcomes. Some predictors, especially raw `top4_avg_rating`, still vary only by draft year. That means the draft-quality signal is partly season-level even though the regression dataset is team-season-level. This is why the final model uses `marginal_lottery_incentive`: it combines season-level draft strength with team-specific lottery position, giving teams in the same draft year different incentive values.
+
+The final model's key coefficient is the standardized position-adjusted draft incentive. It asks whether teams with larger marginal lottery rewards in stronger top-four draft classes have larger tanking signals after controlling for pre-March team strength and separate indicators for the disrupted 2012, 2020, and 2021 seasons. We also include follow-up checks for whether the relationship changed after the 2019 lottery reform, whether a team's roster fit with the draft class adds explanatory power, and whether stronger top-four draft classes are associated with late-season reductions in core-player minutes.
 
 ### Analysis 1: Pre/Post Reform Interaction
 
@@ -655,6 +729,15 @@ model_tanking_index_fit <- lm(
   data = candidate_data
 )
 
+model_core_usage <- lm(
+  core_usage_drop_rate ~ scale(top4_avg_rating) +
+    core_mpg_pre_march +
+    season_2012 +
+    season_2020 +
+    season_2021,
+  data = candidate_data
+)
+
 interaction_table <- bind_rows(
   tidy(model_tanking_index_interaction) |>
     mutate(Outcome = "Tanking index")
@@ -678,6 +761,21 @@ interaction_table <- bind_rows(
     Estimate = estimate,
     `p-value` = p.value
   )
+
+interaction_terms <- tidy(model_tanking_index_interaction)
+interaction_pre_slope_est <- interaction_terms |>
+  filter(term == "scale(top4_avg_rating)") |>
+  pull(estimate)
+interaction_pre_slope_p <- interaction_terms |>
+  filter(term == "scale(top4_avg_rating)") |>
+  pull(p.value)
+interaction_change_est <- interaction_terms |>
+  filter(term == "scale(top4_avg_rating):post_reformTRUE") |>
+  pull(estimate)
+interaction_change_p <- interaction_terms |>
+  filter(term == "scale(top4_avg_rating):post_reformTRUE") |>
+  pull(p.value)
+interaction_post_slope_est <- interaction_pre_slope_est + interaction_change_est
 
 model_table <- bind_rows(
   tidy(model_tanking_index) |>
@@ -781,6 +879,45 @@ fit_index_interaction_p <- tidy(model_tanking_index_fit) |>
   filter(term == "scale(top4_avg_rating):scale(team_fit_score)") |>
   pull(p.value)
 
+fit_index_interaction_est <- tidy(model_tanking_index_fit) |>
+  filter(term == "scale(top4_avg_rating):scale(team_fit_score)") |>
+  pull(estimate)
+
+core_usage_table <- bind_rows(
+  tidy(model_core_usage) |>
+    mutate(Model = "Core-player usage drop rate")
+) |>
+  filter(term != "(Intercept)") |>
+  mutate(
+    term = recode(
+      term,
+      `scale(top4_avg_rating)` = "Top-four draft rating",
+      core_mpg_pre_march = "Pre-March core MPG",
+      season_2012TRUE = "2012 season",
+      season_2020TRUE = "2020 season",
+      season_2021TRUE = "2021 season"
+    )
+  ) |>
+  select(
+    Model,
+    Term = term,
+    Estimate = estimate,
+    `Std. error` = std.error,
+    `p-value` = p.value
+  )
+
+core_usage_terms <- tidy(model_core_usage)
+core_usage_incentive_est <- core_usage_terms |>
+  filter(term == "scale(top4_avg_rating)") |>
+  pull(estimate)
+core_usage_incentive_p <- core_usage_terms |>
+  filter(term == "scale(top4_avg_rating)") |>
+  pull(p.value)
+core_usage_model_n <- nobs(model_core_usage)
+core_usage_incentive_pp <- 100 * core_usage_incentive_est
+core_usage_incentive_abs_pp <- abs(core_usage_incentive_pp)
+core_usage_direction <- if_else(core_usage_incentive_est >= 0, "larger", "smaller")
+
 kable(
   interaction_table,
   digits = 3,
@@ -790,15 +927,17 @@ kable(
 
 The interaction models were included because feedback suggested testing whether the relationship between draft strength and tanking signals changed after the 2019 lottery reform. They are useful as an exploratory check, but they are not our preferred final model. With only 17 draft-class seasons, splitting the draft-strength effect into pre- and post-reform components makes the model harder to estimate and easier for individual seasons to influence.
 
+The coefficient of interest in Table 2 is the draft-strength slope and its interaction with the post-2019 reform indicator. Because `top4_avg_rating` is standardized, the top-four draft rating coefficient means that, before the reform, a one-standard-deviation increase in top-four draft strength is associated with a `r round(interaction_pre_slope_est, 3)` change in the tanking index, holding pre-March strength and disrupted-season controls fixed. The interaction coefficient of `r round(interaction_change_est, 3)` is the additional post-reform change in that slope, so the implied post-reform slope is `r round(interaction_post_slope_est, 3)`. Since the interaction p-value is `r format.pval(interaction_change_p, digits = 2)`, we do not treat this as strong evidence that the relationship changed after the lottery reform.
+
 ### Analysis 2: Position-Adjusted Team-Season Regression
 
 For that reason, our final model pools all seasons together and focuses on the team-specific position-adjusted draft incentive. This keeps the model simpler than the pre/post interaction while addressing an important weakness of the raw draft-rating model: not every likely lottery team has the same chance of turning a strong top-four draft class into a top-four pick.
 
 We considered including both `pre_win_pct` and `games_back_cutline` as model controls, but they are highly correlated among likely lottery candidates, with a correlation of `r round(control_correlation, 3)`. To avoid unnecessary multicollinearity, the final model keeps `pre_win_pct` as the main baseline team-quality control and removes `games_back_cutline` from the regression. `games_back_cutline` still matters in the analysis because it helps define which teams are likely lottery candidates, but it is not included as an additional predictor in the final model.
 
-We also compared two ways of measuring draft strength: the average rating of the top 35 prospects and the average rating of only the top four prospects. The top-four version is our preferred measure because the lottery is mainly about access to the top of the draft. It also performs slightly better in the final model: the top-35 incentive p-value is `r format.pval(top35_index_p, digits = 2)`, compared with `r format.pval(tanking_index_incentive_p, digits = 2)` for the top-four incentive.
+We also compared two ways of measuring draft strength: the average rating of the top 35 prospects and the average rating of only the top four prospects. The top-four version is our preferred measure because the lottery is mainly about access to the top of the draft. In both models, the coefficient of interest has the same interpretation: the expected change in `tanking_index` for a one-standard-deviation increase in the position-adjusted draft incentive. The top-four version performs slightly better in the final model: the top-35 incentive p-value is `r format.pval(top35_index_p, digits = 2)`, compared with `r format.pval(tanking_index_incentive_p, digits = 2)` for the top-four incentive.
 
-We also compared the full `tanking_index` to the positive-only late-collapse score. The positive-only score is useful for labeling obvious cases, but it throws away information by setting all late-season overperformance to zero. With the same controls, the positive-only score gives a position-adjusted incentive p-value of `r format.pval(positive_only_incentive_p, digits = 2)`, compared with `r format.pval(tanking_index_incentive_p, digits = 2)` for the full `tanking_index`. For that reason, the final model uses the full index as the clearer primary outcome.
+We also compared the full `tanking_index` to the positive-only late-collapse score. The positive-only model uses the same incentive coefficient, but the outcome changes: instead of predicting all late-season underperformance and overperformance, it predicts only the positive part of the late-collapse signal. The positive-only score is useful for labeling obvious cases, but it throws away information by setting all late-season overperformance to zero. With the same controls, the positive-only score gives a position-adjusted incentive p-value of `r format.pval(positive_only_incentive_p, digits = 2)`, compared with `r format.pval(tanking_index_incentive_p, digits = 2)` for the full `tanking_index`. For that reason, the final model uses the full index as the clearer primary outcome.
 
 ```{r final-model-table}
 kable(
@@ -808,7 +947,7 @@ kable(
 )
 ```
 
-The tanking-index model has a positive position-adjusted incentive coefficient of `r round(tanking_index_incentive_est, 3)`, with a p-value of `r format.pval(tanking_index_incentive_p, digits = 2)`. This is stronger than the earlier positive-only late-collapse score because the full index keeps all information: underperformance counts positively, while late-season overperformance counts against the tanking-incentive story.
+The tanking-index model has a positive position-adjusted incentive coefficient of `r round(tanking_index_incentive_est, 3)`, with a p-value of `r format.pval(tanking_index_incentive_p, digits = 2)`. Because the incentive variable is standardized, this means that a likely lottery team with a one-standard-deviation larger marginal top-four draft incentive is expected to have a tanking index that is `r round(tanking_index_incentive_est, 3)` units higher, holding pre-March win percentage and disrupted-season controls fixed. Positive values of the tanking index mean more late-season wins below expectation, so the positive coefficient points in the direction predicted by the tanking-incentive story. This is stronger than the earlier positive-only late-collapse score because the full index keeps all information: underperformance counts positively, while late-season overperformance counts against the tanking-incentive story.
 
 Because 2021 is visibly unusual in the exploratory graphs, we also refit the same all-years models after removing only the 2021 season. This is a sensitivity check, not a replacement for the main model. The main model uses all available years from 2010 through 2026, while the sensitivity model asks whether the conclusion depends heavily on one COVID-affected season.
 
@@ -820,7 +959,7 @@ kable(
 )
 ```
 
-Excluding 2021 does not reverse the direction of the estimate. The position-adjusted incentive coefficient changes from `r round(tanking_index_incentive_est, 3)` in the all-years model to `r round(tanking_index_no_2021_incentive_est, 3)` after excluding 2021, with the p-value changing from `r format.pval(tanking_index_incentive_p, digits = 2)` to `r format.pval(tanking_index_no_2021_incentive_p, digits = 2)`. This suggests that 2021 matters, but the main pattern is not simply a one-season artifact. The separate season controls in the main model let us keep all years in the primary analysis while acknowledging that disrupted seasons are not perfectly comparable to normal 82-game seasons.
+Excluding 2021 does not reverse the direction of the estimate. The coefficient has the same interpretation as in Table 3, but it is estimated on the sample without the unusual 2021 season: a one-standard-deviation larger position-adjusted draft incentive is associated with a `r round(tanking_index_no_2021_incentive_est, 3)` higher tanking index, holding the remaining controls fixed. The position-adjusted incentive coefficient changes from `r round(tanking_index_incentive_est, 3)` in the all-years model to `r round(tanking_index_no_2021_incentive_est, 3)` after excluding 2021, with the p-value changing from `r format.pval(tanking_index_incentive_p, digits = 2)` to `r format.pval(tanking_index_no_2021_incentive_p, digits = 2)`. This suggests that 2021 matters, but the main pattern is not simply a one-season artifact. The separate season controls in the main model let us keep all years in the primary analysis while acknowledging that disrupted seasons are not perfectly comparable to normal 82-game seasons.
 
 ### Analysis 3: Team-Fit Heterogeneity Check
 
@@ -863,7 +1002,51 @@ kable(
 )
 ```
 
-The team-fit interaction is not statistically significant. The interaction p-value is `r format.pval(fit_index_interaction_p, digits = 2)`. This does not mean fit is irrelevant; it means our simple fit proxy does not add clear evidence beyond the main draft-strength model. A stronger version of this idea would use team-specific draft boards, roster contract data, or play-type needs instead of broad position groups.
+The coefficient of interest in Table 5 is the interaction between top-four draft strength and team fit. Because both variables are standardized, the interaction coefficient of `r round(fit_index_interaction_est, 3)` means that a one-standard-deviation increase in team fit changes the draft-strength slope by `r round(fit_index_interaction_est, 3)` tanking-index units, holding the controls fixed. The interaction p-value is `r format.pval(fit_index_interaction_p, digits = 2)`, so this is not statistically significant. This does not mean fit is irrelevant; it means our simple fit proxy does not add clear evidence beyond the main draft-strength model. A stronger version of this idea would use team-specific draft boards, roster contract data, or play-type needs instead of broad position groups.
+
+### Analysis 4: Core-Player Usage Reduction
+
+The final exploratory model uses a different kind of tanking signal: whether likely lottery teams reduce the minutes of their main pre-March players late in the season. This is motivated by the idea that tanking may show up not only in losses, but also in roster management. We define each team's core players as the three players with the most pre-March starts, breaking ties by pre-March minutes. To focus on usage changes rather than trades or complete absences, we keep only core players who appeared for the same team at least once after March 1. We then calculate their combined minutes per team game before March and after March. The outcome, `core_usage_drop_rate`, is the percentage drop in those core-player minutes after March 1. Positive values mean the team's main continuing pre-March players were used less late in the season.
+
+This model should be interpreted cautiously. The player logs include `did_not_play`, `active`, and `reason` fields, but they do not perfectly tell us whether a player was healthy. Therefore this is a **core-player usage reduction** model, not proof that teams intentionally benched healthy starters. We use raw top-four draft rating here, instead of the position-adjusted lottery incentive, because this mechanism asks whether stronger top-end classes are associated with a broader roster-management response among likely lottery teams.
+
+```{r core-usage-visual, fig.width=8, fig.height=5.4, fig.cap="Figure 7. Top-four draft strength and core-player usage reduction among likely lottery candidates. Each point is one team-season. Core players are the top three pre-March starters, among players who stayed with the same team and appeared after March 1. The y-axis is the percentage drop in their combined minutes per team game after March 1."}
+candidate_data |>
+  filter(!is.na(core_usage_drop_rate)) |>
+  mutate(label = if_else(core_usage_drop_rate >= quantile(core_usage_drop_rate, 0.95, na.rm = TRUE),
+                         paste(team_abbreviation, season),
+                         NA_character_)) |>
+  ggplot(aes(x = top4_avg_rating, y = core_usage_drop_rate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+  geom_jitter(aes(color = season), width = 0.12, height = 0, size = 2.2, alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "gray35", linewidth = 0.8) +
+  geom_text_repel(
+    aes(label = label),
+    na.rm = TRUE,
+    size = 2.7,
+    seed = 470,
+    box.padding = 0.35,
+    min.segment.length = 0
+  ) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_color_viridis_c(option = "plasma", breaks = seq(2010, 2026, by = 4)) +
+  labs(
+    title = "Core-player usage drops are larger in stronger top-four classes",
+    x = "CraftedNBA average top-four prospect rating",
+    y = "Core-player usage drop after March 1",
+    color = "Season"
+  )
+```
+
+```{r core-usage-table}
+kable(
+  core_usage_table,
+  digits = 3,
+  caption = "Table 6. Exploratory model predicting late-season core-player usage reduction among likely lottery candidates."
+)
+```
+
+The coefficient of interest in Table 6 is the standardized top-four draft rating. Because the draft rating is standardized and the outcome is a percentage drop in core-player minutes, the coefficient of `r round(core_usage_incentive_est, 3)` means that a one-standard-deviation stronger top-four draft class is associated with a `r round(core_usage_incentive_abs_pp, 1)` percentage point `r core_usage_direction` drop in late-season core-player usage, holding pre-March core-player minutes and disrupted-season controls fixed. The p-value is `r format.pval(core_usage_incentive_p, digits = 2)`, so this exploratory model gives stronger evidence of a roster-management pattern than the earlier win-loss models. Still, it should not be interpreted as causal proof of tanking because injuries, planned rest, player development, and unobserved availability can also affect late-season minutes.
 
 ### Conclusions From the Formal Analysis
 
@@ -872,6 +1055,8 @@ The main finding is that draft strength appears related to late-season losing si
 The analysis also shows why the definition of tanking matters. A strict 10 percentage point late-collapse proxy flags only a small number of team-seasons. That makes the proxy conservative, but it can miss meaningful variation around the cutoff. It also creates extra noise by treating all non-flagged teams as the same. The full tanking index is better suited for regression because it measures degree of underperformance rather than forcing a binary cutoff.
 
 The team-fit extension adds a second check on heterogeneity. It asks whether a strong class matters more when its strongest prospect positions line up with a team's roster weaknesses. In our version, the answer is not clear. The fit interaction is not statistically significant, so we do not make it part of the main conclusion. Still, including the extension makes the model more responsive to the basketball mechanism: teams are not only responding to abstract draft strength, but to the players they could realistically hope to add.
+
+The core-player usage model adds a different type of outcome. It asks whether stronger top-four draft classes are associated with using main continuing pre-March players less often late in the season. This is closer to a behavioral tanking mechanism than the win-loss outcome alone, and this version points in the expected direction: stronger top-four classes are associated with larger percentage drops in core-player minutes. At the same time, the result is exploratory because injuries, planned rest, player development, and unobserved availability can all reduce minutes for reasons unrelated to intentional tanking.
 
 The 2021 season remains an important case. Several teams underperformed sharply late in the season, but that year was shortened and affected by COVID-era scheduling and player availability. Rather than deleting 2021 from the main model, we include a separate 2021 control. We also include separate controls for 2012 and 2020 because those seasons were disrupted in different ways. This keeps the observations in the main analysis while acknowledging that they may not be comparable to normal 82-game seasons.
 
@@ -887,7 +1072,7 @@ A second limitation is that raw draft strength varies by season, not by team. Ev
 
 ### Future Extensions
 
-A direct next step is to measure player resting more explicitly. One peer-review suggestion was to add a variable for whether teams benched starters or reduced minutes for their best players late in the season. A practical version would use player game logs to identify each team's top pre-March minute players, then measure whether those players' minutes or games played dropped sharply after March. This would help separate strategic late-season roster management from ordinary losing.
+A direct next step is to improve the core-player usage model with better availability data. The version in this report uses player game logs to identify each team's main pre-March players who stayed with the team and appeared after March 1, then measures whether their minutes drop late in the season. This keeps the analysis focused on continuing players, but it still cannot perfectly distinguish injuries, rest, player development, and coach's decisions. A stronger version would merge injury reports, transaction data, and inactive-list reasons to separate strategic late-season roster management from ordinary player availability.
 
 Another extension would improve the team-fit score. The current version uses broad position groups and pre-March box-score production, not detailed roster needs, contracts, player age, front-office preferences, or team-specific draft evaluations. The fit extension should therefore be interpreted as a first-pass robustness check rather than a final answer about roster construction.
 
@@ -895,7 +1080,7 @@ A final extension would compare multiple draft-quality measures. The CraftedNBA 
 
 ### Final Takeaway
 
-This project finds suggestive evidence that draft class strength is related to late-season losing signals among likely lottery candidates. The clearest descriptive patterns come from season-level draft-strength graphs, while the more conservative position-adjusted model shows positive but noisier estimates. The full tanking index is a better final outcome than a hard 10 percentage point cutoff because it measures the size and direction of late-season underperformance instead of only flagging the most obvious collapses.
+This project finds suggestive evidence that draft class strength is related to late-season losing signals among likely lottery candidates. The clearest descriptive patterns come from season-level draft-strength graphs, while the more conservative position-adjusted win-loss model shows positive but noisier estimates. The core-player usage model adds a stronger exploratory signal that teams in better top-four draft classes reduced minutes more for continuing core players. The full tanking index is a better final win-loss outcome than a hard 10 percentage point cutoff because it measures the size and direction of late-season underperformance instead of only flagging the most obvious collapses.
 
 The most defensible conclusion is therefore cautious: draft class quality appears relevant to tanking incentives, but the evidence is not strong enough to claim that stronger draft classes directly cause tanking. The project improves on simpler tanking analyses by combining playoff context, lottery position, standardized late-season underperformance, and draft class quality into one framework.
 
