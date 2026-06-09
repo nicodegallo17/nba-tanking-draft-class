@@ -1,0 +1,169 @@
+:root {
+  --r-background-color: #f7f6f0;
+  --r-main-color: #1d252c;
+  --r-heading-color: #163b45;
+  --r-link-color: #a63d40;
+  --r-main-font: Arial, Helvetica, sans-serif;
+  --r-heading-font: Arial, Helvetica, sans-serif;
+  --r-heading-text-transform: none;
+  --r-heading-letter-spacing: 0;
+  --r-main-font-size: 31px;
+  --r-code-color: #a63d40;
+}
+
+.reveal-viewport {
+  background: #f7f6f0;
+}
+
+.reveal {
+  font-weight: 400;
+}
+
+.reveal .slides {
+  text-align: left;
+}
+
+.reveal h1,
+.reveal h2,
+.reveal h3 {
+  font-weight: 760;
+  line-height: 1.05;
+}
+
+.reveal h1 {
+  font-size: 2.35em;
+}
+
+.reveal h2 {
+  font-size: 1.55em;
+}
+
+.reveal h3 {
+  font-size: 1.05em;
+}
+
+.reveal p,
+.reveal li {
+  line-height: 1.32;
+}
+
+.reveal ul {
+  margin-left: 1.1em;
+}
+
+.reveal li + li {
+  margin-top: 0.28em;
+}
+
+.reveal .subtitle {
+  color: #52656f;
+  font-size: 0.92em;
+}
+
+.reveal .date,
+.reveal .author {
+  color: #52656f;
+}
+
+.reveal .slide-number {
+  color: #52656f;
+}
+
+.accent {
+  color: #a63d40;
+  font-weight: 760;
+}
+
+.muted {
+  color: #63727b;
+}
+
+.small {
+  font-size: 0.72em;
+}
+
+.tight li {
+  margin-top: 0.12em;
+}
+
+.callout {
+  border-left: 0.22rem solid #a63d40;
+  padding-left: 0.72rem;
+  margin-top: 0.8rem;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.7rem;
+  margin-top: 0.9rem;
+}
+
+.stat {
+  border-top: 0.12rem solid #d4c8a2;
+  padding-top: 0.42rem;
+}
+
+.stat .value {
+  color: #a63d40;
+  display: block;
+  font-size: 1.55em;
+  font-weight: 780;
+  line-height: 1;
+}
+
+.stat .label {
+  color: #52656f;
+  display: block;
+  font-size: 0.64em;
+  line-height: 1.2;
+  margin-top: 0.24rem;
+}
+
+.rubric-map {
+  display: grid;
+  gap: 0.45rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.rubric-map div {
+  border-left: 0.12rem solid #d4c8a2;
+  padding-left: 0.55rem;
+}
+
+.rubric-map strong {
+  color: #163b45;
+}
+
+.takeaway {
+  background: #ffffff;
+  border: 1px solid #d9ddd8;
+  border-radius: 8px;
+  padding: 0.75rem 0.85rem;
+}
+
+.reveal table {
+  font-size: 0.58em;
+  margin-left: 0;
+}
+
+.reveal table th {
+  color: #163b45;
+  font-weight: 760;
+}
+
+.reveal table td,
+.reveal table th {
+  padding: 0.25em 0.45em;
+}
+
+.reveal img,
+.reveal svg {
+  max-height: 66vh;
+}
+
+.source-note {
+  color: #63727b;
+  font-size: 0.48em;
+  margin-top: 0.5rem;
+}

@@ -1,0 +1,797 @@
+---
+title: "Draft Class Strength and NBA Tanking Incentives"
+subtitle: "Final project presentation"
+author: "Nico L, Leo K, Colin C"
+format:
+  revealjs:
+    theme: default
+    css: final-presentation.css
+    slide-number: true
+    transition: fade
+    incremental: false
+    embed-resources: true
+    html-math-method: plain
+    width: 1280
+    height: 720
+    margin: 0.075
+    chalkboard: false
+    preview-links: auto
+execute:
+  echo: false
+  warning: false
+  message: false
+editor: visual
+---
+
+```{r setup}
+#| include: false
+library(tidyverse)
+library(lubridate)
+library(broom)
+library(ggrepel)
+library(scales)
+library(knitr)
+
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", color = "#163B45", size = 15),
+      plot.subtitle = element_text(color = "#52656F", size = 10.5),
+      axis.title = element_text(color = "#1D252C", size = 10.5),
+      axis.text = element_text(color = "#52656F", size = 9),
+      panel.grid.minor = element_blank(),
+      legend.title = element_text(size = 9),
+      legend.text = element_text(size = 8.5),
+      plot.background = element_rect(fill = "#F7F6F0", color = NA),
+      panel.background = element_rect(fill = "#F7F6F0", color = NA)
+    )
+)
+
+team_box <- readRDS("data/nba_team_box_2010_2026.rds")
+player_box <- readRDS("data/nba_player_box_2010_2026.rds")
+draft_prospects <- read_csv("data/crafted_prospects_2010_2026.csv", show_col_types = FALSE)
+draft_strength <- read_csv("data/crafted_draft_strength_2010_2026.csv", show_col_types = FALSE)
+
+collapse_repeated_rows <- function(data, columns) {
+  for (column in columns) {
+    values <- as.character(data[[column]])
+    repeated <- values == lag(values, default = NA_character_)
+    values[replace_na(repeated, FALSE)] <- ""
+    data[[column]] <- values
+  }
+
+  data
+}
+
+position_group_from_label <- function(position, archetype = rep(NA_character_, length(position))) {
+  case_when(
+    position %in% c("PG", "SG", "G") ~ "Guard",
+    position %in% c("SF", "F") ~ "Wing",
+    position %in% c("PF", "C") ~ "Big",
+    archetype == "Guard" ~ "Guard",
+    archetype %in% c("Wing", "Forward") ~ "Wing",
+    archetype == "Big" ~ "Big",
+    TRUE ~ NA_character_
+  )
+}
+```
+
+```{r data-build}
+#| include: false
+nba_teams <- c(
+  "ATL", "BOS", "BKN", "NJ", "CHA", "CHI", "CLE", "DAL", "DEN", "DET",
+  "GS", "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NO",
+  "NY", "OKC", "ORL", "PHI", "PHX", "POR", "SA", "SAC", "TOR", "UTAH",
+  "WSH"
+)
+
+conference_lookup <- tibble(
+  team_abbreviation = nba_teams,
+  conference = c(
+    "East", "East", "East", "East", "East", "East", "East", "West", "West", "East",
+    "West", "West", "East", "West", "West", "West", "East", "East", "West", "West",
+    "East", "West", "East", "East", "West", "West", "West", "West", "East", "West",
+    "East"
+  )
+)
+
+regular_games <- team_box |>
+  filter(
+    season_type == 2,
+    team_abbreviation %in% nba_teams,
+    season %in% 2010:2026
+  ) |>
+  mutate(
+    win = team_score > opponent_team_score,
+    cutoff_date = as.Date(paste0(season, "-03-01")),
+    season_period = if_else(game_date < cutoff_date, "pre_march", "late")
+  ) |>
+  left_join(conference_lookup, by = "team_abbreviation")
+
+team_periods <- regular_games |>
+  group_by(season, team_abbreviation, conference, season_period) |>
+  summarise(
+    games = n(),
+    wins = sum(win, na.rm = TRUE),
+    losses = games - wins,
+    point_diff = mean(team_score - opponent_team_score, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_wider(
+    names_from = season_period,
+    values_from = c(games, wins, losses, point_diff),
+    values_fill = 0
+  )
+
+compute_lottery_odds <- function(weights, draws) {
+  seeds <- seq_along(weights)
+  top_pick_odds <- numeric(length(weights))
+  top4_pick_odds <- numeric(length(weights))
+
+  add_draw_path <- function(remaining, drawn, path_probability) {
+    if (length(drawn) == draws) {
+      final_order <- c(drawn, setdiff(seeds, drawn))
+      top_pick_odds[final_order[1]] <<- top_pick_odds[final_order[1]] + path_probability
+      top4_pick_odds[final_order[1:4]] <<- top4_pick_odds[final_order[1:4]] + path_probability
+      return(invisible(NULL))
+    }
+
+    total_weight <- sum(weights[remaining])
+    for (seed in remaining) {
+      add_draw_path(
+        remaining = setdiff(remaining, seed),
+        drawn = c(drawn, seed),
+        path_probability = path_probability * weights[seed] / total_weight
+      )
+    }
+  }
+
+  add_draw_path(seeds, integer(), 1)
+
+  tibble(
+    lottery_seed_march = seeds,
+    top_pick_odds = top_pick_odds,
+    top4_pick_odds = top4_pick_odds
+  )
+}
+
+lottery_odds <- bind_rows(
+  compute_lottery_odds(
+    weights = c(250, 199, 156, 119, 88, 63, 43, 28, 17, 11, 8, 7, 6, 5),
+    draws = 3
+  ) |>
+    mutate(post_reform = FALSE),
+  compute_lottery_odds(
+    weights = c(140, 140, 140, 125, 105, 90, 75, 60, 45, 30, 20, 15, 10, 5),
+    draws = 4
+  ) |>
+    mutate(post_reform = TRUE)
+) |>
+  group_by(post_reform) |>
+  arrange(lottery_seed_march, .by_group = TRUE) |>
+  mutate(
+    marginal_top4_pick_gain = pmax(0, lag(top4_pick_odds) - top4_pick_odds),
+    marginal_top4_pick_gain = replace_na(marginal_top4_pick_gain, 0),
+    marginal_top4_pick_gain = if_else(marginal_top4_pick_gain < 1e-8, 0, marginal_top4_pick_gain)
+  ) |>
+  ungroup()
+
+team_data <- team_periods |>
+  mutate(
+    pre_win_pct = wins_pre_march / games_pre_march,
+    postseason_cutline = if_else(season >= 2021, 10L, 8L)
+  ) |>
+  group_by(season, conference) |>
+  arrange(desc(pre_win_pct), desc(wins_pre_march), .by_group = TRUE) |>
+  mutate(
+    conference_rank_march = row_number(),
+    cutline_wins = wins_pre_march[postseason_cutline[1]],
+    cutline_losses = losses_pre_march[postseason_cutline[1]],
+    games_back_cutline = pmax(
+      0,
+      ((cutline_wins - wins_pre_march) + (losses_pre_march - cutline_losses)) / 2
+    )
+  ) |>
+  ungroup() |>
+  group_by(season) |>
+  arrange(pre_win_pct, wins_pre_march, point_diff_pre_march, .by_group = TRUE) |>
+  mutate(
+    lottery_position_march = row_number(),
+    lottery_seed_march = pmin(lottery_position_march, 14L)
+  ) |>
+  ungroup() |>
+  mutate(
+    late_win_pct = wins_late / games_late,
+    expected_late_wins = games_late * pre_win_pct,
+    expected_sd = sqrt(pmax(games_late * pre_win_pct * (1 - pre_win_pct), 0.001)),
+    late_win_shortfall = expected_late_wins - wins_late,
+    tanking_index = late_win_shortfall / expected_sd,
+    likely_lottery_candidate = conference_rank_march > postseason_cutline &
+      (games_back_cutline >= 3 | pre_win_pct < 0.400),
+    post_reform = season >= 2019,
+    season_2012 = season == 2012,
+    season_2020 = season == 2020,
+    season_2021 = season == 2021,
+    lottery_era = if_else(post_reform, "Post-reform (2019-2026)", "Pre-reform (2010-2018)")
+  ) |>
+  left_join(
+    draft_strength |>
+      select(
+        draft_year,
+        avg_rating,
+        top_prospect_rating,
+        top4_avg_rating,
+        top5_avg_rating
+      ),
+    by = c("season" = "draft_year")
+  ) |>
+  left_join(
+    lottery_odds,
+    by = c("post_reform", "lottery_seed_march")
+  ) |>
+  mutate(
+    marginal_lottery_incentive = top4_avg_rating * marginal_top4_pick_gain,
+    marginal_lottery_incentive_top35 = avg_rating * marginal_top4_pick_gain
+  )
+
+player_usage <- player_box |>
+  filter(
+    season_type == 2,
+    season %in% 2010:2026,
+    team_abbreviation %in% nba_teams
+  ) |>
+  mutate(
+    cutoff_date = as.Date(paste0(season, "-03-01")),
+    season_period = if_else(game_date < cutoff_date, "pre_march", "late"),
+    minutes_num = suppressWarnings(as.numeric(minutes)),
+    minutes_played = replace_na(minutes_num, 0),
+    starter_flag = starter %in% TRUE
+  )
+
+team_games <- regular_games |>
+  distinct(season, team_abbreviation, game_id, game_date, season_period)
+
+late_core_appearances <- player_usage |>
+  filter(season_period == "late", minutes_played > 0) |>
+  distinct(season, team_abbreviation, athlete_id)
+
+core_players <- player_usage |>
+  filter(season_period == "pre_march", minutes_played > 0) |>
+  group_by(season, team_abbreviation, athlete_id, athlete_display_name) |>
+  summarise(
+    pre_starts = sum(starter_flag, na.rm = TRUE),
+    pre_minutes = sum(minutes_played, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  group_by(season, team_abbreviation) |>
+  arrange(desc(pre_starts), desc(pre_minutes), .by_group = TRUE) |>
+  slice_head(n = 3) |>
+  ungroup() |>
+  semi_join(
+    late_core_appearances,
+    by = c("season", "team_abbreviation", "athlete_id")
+  )
+
+core_usage <- core_players |>
+  select(season, team_abbreviation, athlete_id) |>
+  inner_join(
+    team_games,
+    by = c("season", "team_abbreviation"),
+    relationship = "many-to-many"
+  ) |>
+  left_join(
+    player_usage |>
+      select(season, team_abbreviation, game_id, athlete_id, minutes_played),
+    by = c("season", "team_abbreviation", "game_id", "athlete_id")
+  ) |>
+  mutate(minutes_played = replace_na(minutes_played, 0)) |>
+  group_by(season, team_abbreviation, season_period) |>
+  summarise(
+    core_minutes_per_game = sum(minutes_played, na.rm = TRUE) / n_distinct(game_id),
+    .groups = "drop"
+  ) |>
+  pivot_wider(
+    names_from = season_period,
+    values_from = core_minutes_per_game,
+    names_prefix = "core_mpg_"
+  ) |>
+  mutate(
+    core_usage_drop = core_mpg_pre_march - core_mpg_late,
+    core_usage_drop_rate = if_else(
+      core_mpg_pre_march > 0,
+      core_usage_drop / core_mpg_pre_march,
+      NA_real_
+    )
+  )
+
+team_data <- team_data |>
+  left_join(core_usage, by = c("season", "team_abbreviation"))
+
+candidate_data <- team_data |>
+  filter(likely_lottery_candidate)
+
+season_summary <- candidate_data |>
+  group_by(season, lottery_era) |>
+  summarise(
+    top4_avg_rating = first(top4_avg_rating),
+    mean_tanking_index = mean(tanking_index, na.rm = TRUE),
+    candidate_count = n(),
+    .groups = "drop"
+  )
+
+model_tanking_index <- lm(
+  tanking_index ~ scale(marginal_lottery_incentive) +
+    pre_win_pct +
+    season_2012 +
+    season_2020 +
+    season_2021,
+  data = candidate_data
+)
+
+candidate_data_no_2021 <- candidate_data |>
+  filter(season != 2021)
+
+model_tanking_index_no_2021 <- lm(
+  tanking_index ~ scale(marginal_lottery_incentive) +
+    pre_win_pct +
+    season_2012 +
+    season_2020,
+  data = candidate_data_no_2021
+)
+
+model_core_usage <- lm(
+  core_usage_drop_rate ~ scale(top4_avg_rating) +
+    core_mpg_pre_march +
+    season_2012 +
+    season_2020 +
+    season_2021,
+  data = candidate_data
+)
+
+model_core_usage_position_adjusted <- lm(
+  core_usage_drop_rate ~ scale(marginal_lottery_incentive) +
+    core_mpg_pre_march +
+    season_2012 +
+    season_2020 +
+    season_2021,
+  data = candidate_data
+)
+
+model_terms <- tidy(model_tanking_index)
+tanking_index_incentive_est <- model_terms |>
+  filter(term == "scale(marginal_lottery_incentive)") |>
+  pull(estimate)
+tanking_index_incentive_p <- model_terms |>
+  filter(term == "scale(marginal_lottery_incentive)") |>
+  pull(p.value)
+
+no_2021_terms <- tidy(model_tanking_index_no_2021)
+tanking_index_no_2021_est <- no_2021_terms |>
+  filter(term == "scale(marginal_lottery_incentive)") |>
+  pull(estimate)
+tanking_index_no_2021_p <- no_2021_terms |>
+  filter(term == "scale(marginal_lottery_incentive)") |>
+  pull(p.value)
+
+core_usage_terms <- tidy(model_core_usage)
+core_usage_top4_est <- core_usage_terms |>
+  filter(term == "scale(top4_avg_rating)") |>
+  pull(estimate)
+core_usage_top4_p <- core_usage_terms |>
+  filter(term == "scale(top4_avg_rating)") |>
+  pull(p.value)
+
+core_usage_position_terms <- tidy(model_core_usage_position_adjusted)
+core_usage_position_est <- core_usage_position_terms |>
+  filter(term == "scale(marginal_lottery_incentive)") |>
+  pull(estimate)
+core_usage_position_p <- core_usage_position_terms |>
+  filter(term == "scale(marginal_lottery_incentive)") |>
+  pull(p.value)
+
+summary_counts <- list(
+  team_seasons = nrow(team_data),
+  seasons = n_distinct(team_data$season),
+  candidate_seasons = nrow(candidate_data),
+  candidate_share = nrow(candidate_data) / nrow(team_data),
+  top4_min = min(team_data$top4_avg_rating, na.rm = TRUE),
+  top4_max = max(team_data$top4_avg_rating, na.rm = TRUE)
+)
+```
+
+## Why This Project Matters
+
+::: callout
+**Research question:** Are stronger NBA draft classes associated with more late-season underperformance among teams with weak playoff outlooks?
+:::
+
+-   Tanking debates usually focus on lottery odds.
+-   This project adds the value of the actual draft class.
+-   We measure **tanking signals**, not intent.
+
+:::::: stat-grid
+::: stat
+[`r summary_counts$seasons`]{.value}[NBA seasons, 2010-2026]{.label}
+:::
+
+::: stat
+[`r summary_counts$team_seasons`]{.value}[team-seasons in final data]{.label}
+:::
+
+::: stat
+[`r percent(summary_counts$candidate_share, accuracy = 1)`]{.value}[classified as likely lottery candidates]{.label}
+:::
+::::::
+
+::: notes
+Nico opens. Keep this to about 75 seconds: question, why it matters, and the caution that we study signals rather than intent.
+:::
+
+## Talk Map
+
+::::::: rubric-map
+<div>
+
+<strong>Nico</strong><br>Question, motivation, and data
+
+</div>
+
+<div>
+
+<strong>Leo</strong><br>Tanking index and lottery incentive construction
+
+</div>
+
+<div>
+
+<strong>Colin</strong><br>Results, interpretation, and limitations
+
+</div>
+
+<div>
+
+<strong>All</strong><br>Q&A after the final takeaway
+
+</div>
+:::::::
+
+::: callout
+Target length: **12-14 minutes** for slides, leaving about **5 minutes** for questions.
+:::
+
+::: notes
+This slide makes coordination visible for the rubric. Move quickly.
+:::
+
+## Data Sources
+
+-   **NBA team game logs:** regular-season team box scores from `hoopR`.
+-   **NBA player game logs:** used to estimate late-season changes in core-player minutes.
+-   **CraftedNBA draft ratings:** external ratings for draft classes and prospects.
+
+::: takeaway
+Each observation is a **team-season**. Draft quality changes by season, while team context changes by team.
+:::
+
+<p class="source-note">
+
+Sources: hoopR; CraftedNBA draft class rankings and prospect data.
+
+</p>
+
+::: notes
+Nico. The main point is that the project combines basketball outcomes with an external draft-strength measure.
+:::
+
+## How We Define A Tanking Signal
+
+We split every regular season at **March 1**.
+
+::: takeaway
+**Tanking index = (expected late wins - actual late wins) / expected late-win standard deviation**
+:::
+
+-   `pre_win_pct` estimates team strength before the final stretch.
+-   Positive tanking index = fewer late wins than expected.
+-   "Likely lottery candidates" are teams outside the postseason cutline and at least 3 games back or below .400 before March.
+
+::: notes
+Leo. Emphasize that this avoids calling every bad team a tanking team. We compare teams against their own earlier baseline.
+:::
+
+## What The Candidate Filter Captures
+
+```{r summary-table}
+summary_table <- team_data |>
+  mutate(group = if_else(likely_lottery_candidate, "Likely lottery candidates", "Other teams")) |>
+  group_by(group) |>
+  summarise(
+    N = n(),
+    `Pre win pct` = mean(pre_win_pct, na.rm = TRUE),
+    `Late win pct` = mean(late_win_pct, na.rm = TRUE),
+    `Mean tanking index` = mean(tanking_index, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(group))
+
+kable(summary_table, digits = 3, align = "lrrrr")
+```
+
+::: callout
+The candidate filter identifies weaker teams, but most of them do **not** sharply collapse late.
+:::
+
+::: notes
+Leo. The table supports the methods: the filter finds the teams where incentives plausibly exist, and the continuous index keeps the result from depending on a binary label.
+:::
+
+## Late-Season Performance Vs. Pre-March Baseline
+
+```{r visual-expected-vs-actual}
+#| fig-width: 9.4
+#| fig-height: 5.15
+#| out-width: 92%
+label_data <- team_data |>
+  filter(likely_lottery_candidate) |>
+  slice_max(tanking_index, n = 10, with_ties = FALSE)
+
+ggplot(team_data, aes(x = pre_win_pct, y = late_win_pct)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray55") +
+  geom_point(
+    aes(color = tanking_index, shape = likely_lottery_candidate),
+    size = 2.25,
+    alpha = 0.72
+  ) +
+  geom_text_repel(
+    data = label_data,
+    aes(label = paste(team_abbreviation, season)),
+    size = 2.8,
+    seed = 470,
+    box.padding = 0.35,
+    min.segment.length = 0
+  ) +
+  scale_x_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+  scale_color_gradient2(
+    low = "#2F5D62",
+    mid = "gray76",
+    high = "#A63D40",
+    midpoint = 0
+  ) +
+  labs(
+    title = "Most teams stay near their pre-March pace",
+    subtitle = "Labels show the largest positive tanking-index seasons among likely lottery candidates",
+    x = "Pre-March win percentage",
+    y = "March-onward win percentage",
+    color = "Tanking index",
+    shape = "Likely lottery candidate"
+  )
+```
+
+::: notes
+Leo. Points below the line underperformed late. Redder points had larger standardized late-season win shortfalls.
+:::
+
+## Measuring The Draft Incentive
+
+We use top-end draft quality because the lottery is mainly about access to the top of the draft.
+
+::: takeaway
+**Position-adjusted incentive = top-four prospect rating x marginal gain in top-four-pick odds**
+:::
+
+-   Top-four average rating ranges from **`r round(summary_counts$top4_min, 1)`** to **`r round(summary_counts$top4_max, 1)`** across drafts.
+-   The same draft class creates different incentives for different lottery positions.
+-   Teams with no extra top-four probability gain from moving one slot worse get an incentive value of 0.
+
+::: notes
+Leo. This is the bridge from a season-level draft variable to a team-season incentive variable.
+:::
+
+## Draft Strength And Late-Season Underperformance
+
+```{r visual-draft-strength}
+#| fig-width: 9.4
+#| fig-height: 5.15
+#| out-width: 92%
+ggplot(season_summary, aes(x = top4_avg_rating, y = mean_tanking_index, color = lottery_era)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray55") +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.8) +
+  geom_point(aes(size = candidate_count), alpha = 0.88) +
+  geom_text_repel(aes(label = season), size = 2.8, seed = 470, min.segment.length = 0) +
+  scale_color_manual(
+    values = c(
+      "Pre-reform (2010-2018)" = "#52656F",
+      "Post-reform (2019-2026)" = "#A63D40"
+    )
+  ) +
+  scale_size_continuous(range = c(2.8, 7.2), name = "Likely lottery\nteams") +
+  labs(
+    title = "Stronger top-four classes line up with higher average tanking signals",
+    subtitle = "Each point is one draft season summarized across likely lottery candidates",
+    x = "CraftedNBA average top-four prospect rating",
+    y = "Mean tanking index among likely lottery candidates",
+    color = "Lottery era"
+  )
+```
+
+::: notes
+Colin. This is descriptive, not causal. Mention that draft strength has only 17 season-level observations.
+:::
+
+## Team-Specific Incentives Are Noisier
+
+```{r visual-position-adjusted-incentive}
+#| fig-width: 9.4
+#| fig-height: 5.15
+#| out-width: 92%
+figure_data <- candidate_data |>
+  arrange(season, team_abbreviation) |>
+  group_by(zero_incentive = marginal_lottery_incentive == 0) |>
+  mutate(
+    marginal_lottery_incentive_plot = if_else(
+      zero_incentive,
+      marginal_lottery_incentive + ((row_number() - 1) %% 7) * 0.025,
+      marginal_lottery_incentive
+    )
+  ) |>
+  ungroup()
+
+ggplot(figure_data, aes(x = marginal_lottery_incentive, y = tanking_index, color = lottery_seed_march)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+  geom_point(
+    aes(x = marginal_lottery_incentive_plot),
+    alpha = 0.72,
+    size = 2.2
+  ) +
+  geom_smooth(method = "lm", se = FALSE, color = "gray35", linewidth = 0.8) +
+  scale_color_viridis_c(
+    option = "viridis",
+    direction = -1,
+    breaks = c(1, 4, 7, 10, 14)
+  ) +
+  labs(
+    title = "Team-specific incentive points in the expected direction",
+    subtitle = "But late-season wins are still affected by injuries, trades, rest, and randomness",
+    x = "Top-four rating x marginal top-four-pick probability gain",
+    y = "Tanking index",
+    color = "March lottery seed"
+  )
+```
+
+::: notes
+Colin. This is the conservative view: still positive, but much noisier than the season-average plot.
+:::
+
+## Main Regression Results
+
+```{r model-results-table}
+model_results <- tibble(
+  Outcome = c(
+    "Tanking index",
+    "Tanking index",
+    "Core-player usage drop"
+  ),
+  Model = c(
+    "All seasons",
+    "Excluding 2021",
+    "All seasons"
+  ),
+  `Key predictor` = c(
+    "Position-adjusted draft incentive",
+    "Position-adjusted draft incentive",
+    "Top-four draft rating"
+  ),
+  Estimate = c(
+    tanking_index_incentive_est,
+    tanking_index_no_2021_est,
+    100 * core_usage_top4_est
+  ),
+  `p-value` = c(
+    tanking_index_incentive_p,
+    tanking_index_no_2021_p,
+    core_usage_top4_p
+  )
+)
+
+kable(
+  model_results,
+  digits = 3,
+  align = "lllrr",
+  caption = "Positive estimates mean stronger draft incentives are associated with larger tanking signals."
+)
+```
+
+::: callout
+The win-loss model is **suggestive**. The core-player usage model is a stronger exploratory signal.
+:::
+
+::: notes
+Colin. Interpret the signs first. Do not oversell p-values. The 2021 sensitivity check is here because COVID-era disruptions matter.
+:::
+
+## Roster Management Signal
+
+```{r core-usage-visual}
+#| fig-width: 9.4
+#| fig-height: 5.15
+#| out-width: 92%
+candidate_data |>
+  filter(!is.na(core_usage_drop_rate)) |>
+  mutate(
+    label = if_else(
+      core_usage_drop_rate >= quantile(core_usage_drop_rate, 0.95, na.rm = TRUE),
+      paste(team_abbreviation, season),
+      NA_character_
+    )
+  ) |>
+  ggplot(aes(x = top4_avg_rating, y = core_usage_drop_rate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+  geom_jitter(aes(color = season), width = 0.12, height = 0, size = 2.2, alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "gray35", linewidth = 0.8) +
+  geom_text_repel(
+    aes(label = label),
+    na.rm = TRUE,
+    size = 2.7,
+    seed = 470,
+    box.padding = 0.35,
+    min.segment.length = 0
+  ) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_color_viridis_c(option = "plasma", breaks = seq(2010, 2026, by = 4)) +
+  labs(
+    title = "Core-player usage drops are larger in stronger top-four classes",
+    subtitle = "Outcome: late-season percentage drop in minutes for top three continuing pre-March starters",
+    x = "CraftedNBA average top-four prospect rating",
+    y = "Core-player usage drop after March 1",
+    color = "Season"
+  )
+```
+
+::: notes
+Colin. Explain why this is closer to behavior than wins alone, then say it still cannot distinguish healthy rest from injuries or development minutes.
+:::
+
+## What We Learned
+
+-   Draft strength appears relevant to NBA tanking incentives.
+-   The cleanest win-loss result is positive but noisy.
+-   Roster management may be a better follow-up signal than wins alone.
+-   The project improves on simple tanking stories by combining playoff context, lottery position, and draft class quality.
+
+::: takeaway
+Most defensible conclusion: **stronger draft classes are associated with larger tanking signals, but the evidence does not prove intentional losing.**
+:::
+
+::: notes
+Nico or Colin. This is the main interpretation slide. Land the cautious final claim clearly.
+:::
+
+## Limitations And Next Steps
+
+-   Tanking intent is not directly observable.
+-   Draft strength varies mostly by season, so there are only `r summary_counts$seasons` draft-class observations.
+-   Disrupted seasons, especially 2012, 2020, and 2021, require caution.
+-   Next improvements: injury reports, trade-deadline roster changes, strength of remaining schedule, and more draft-quality measures.
+
+::: notes
+All speakers can share this slide if needed. Keep it brief so the talk ends under 15 minutes.
+:::
+
+## Final Takeaway
+
+::: callout
+Stronger top-end draft classes do not automatically prove tanking, but they appear to make late-season losing signals more likely among teams already outside realistic playoff contention.
+:::
+
+**Questions?**
+
+<p class="source-note">
+
+References used in the full report: CraftedNBA, hoopR, NBA lottery rules, Taylor & Trogdon (2002), Price et al. (2010).
+
+</p>
+
+::: notes
+Thank the audience and invite questions. Leave about five minutes.
+:::
