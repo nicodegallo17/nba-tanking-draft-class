@@ -39,6 +39,17 @@ draft_strength <- read_csv(
 )
 
 theme_set(theme_minimal(base_size = 12))
+
+collapse_repeated_rows <- function(data, columns) {
+  for (column in columns) {
+    values <- as.character(data[[column]])
+    repeated <- values == lag(values, default = NA_character_)
+    values[replace_na(repeated, FALSE)] <- ""
+    data[[column]] <- values
+  }
+
+  data
+}
 ```
 
 ```{r data-build}
@@ -403,25 +414,142 @@ The lottery-position adjustment uses published NBA lottery weights. Before the 2
 
 Key constructed variables:
 
--   `pre_win_pct` and `late_win_pct` are each team's winning percentage before March 1 and on or after March 1. `pre_win_pct` is used as a baseline team-strength control because a team that was already very weak before March should not be evaluated the same way as a team that was close to .500.
+-   `pre_win_pct` and `late_win_pct` are each team's winning percentage before March 1 and on or after March 1.
+
+    $$
+    \text{Pre-March win pct} = \frac{W_{\text{pre}}}{G_{\text{pre}}},
+    \qquad
+    \text{Late win pct} = \frac{W_{\text{late}}}{G_{\text{late}}}
+    $$
+
+    `pre_win_pct` is used as a baseline team-strength control because a team that was already very weak before March should not be evaluated the same way as a team that was close to .500.
+
 -   `games_back_cutline` measures how far a team was from the postseason/play-in cutoff entering March. For seasons before the play-in era, the cutoff is the 8th seed. For seasons beginning in 2021, the cutoff is the 10th seed. We use this to help identify teams with weak playoff outlooks.
--   `likely_lottery_candidate` is our sample filter for teams that plausibly had an incentive to prioritize draft position over late-season wins. A team is classified this way if it was outside the relevant postseason cutoff and was either at least 3 games behind that cutoff or below a .400 pre-March winning percentage. This is not an outcome variable; it defines the group of teams used in the formal models.
+
+    $$
+    \text{Games back} =
+    \max\left(
+      0,
+      \frac{(W_{\text{cutline}} - W_{\text{team}})
+      + (L_{\text{team}} - L_{\text{cutline}})}{2}
+    \right)
+    $$
+
+-   `likely_lottery_candidate` is our sample filter for teams that plausibly had an incentive to prioritize draft position over late-season wins.
+
+    $$
+    \text{Likely lottery candidate} =
+    \begin{cases}
+    1, & \text{outside cutoff and }(\text{games back} \geq 3
+    \text{ or pre-March win pct} < 0.400)\\
+    0, & \text{otherwise}
+    \end{cases}
+    $$
+
+    This is not an outcome variable; it defines the group of teams used in the formal models.
+
 -   `lottery_seed_march` is an estimated lottery position entering March, based on league-wide pre-March record. The worst pre-March record is seed 1, the second-worst is seed 2, and so on through the 14-team lottery. This is an approximation because final lottery order depends on end-of-season records and tiebreakers.
--   `top4_avg_rating` is the average CraftedNBA rating of the top four prospects in a draft class. Higher values mean a stronger top of the draft. This variable is the same for every team in the same season, so raw top-four draft-strength models are interpreted as draft-class-level evidence.
--   `marginal_lottery_incentive` is our team-specific draft incentive. First, we calculate how much a team's probability of landing a top-four pick would increase if it moved one lottery slot worse. Then we multiply that probability gain by `top4_avg_rating`:\
-    `marginal_lottery_incentive = top4_avg_rating x marginal top-four-pick probability gain`.\
+
+-   `top4_avg_rating` is the average CraftedNBA rating of the top four prospects in a draft class.
+
+    $$
+    \text{Top-four average rating} =
+    \frac{r_1 + r_2 + r_3 + r_4}{4}
+    $$
+
+    Higher values mean a stronger top of the draft. This variable is the same for every team in the same season, so raw top-four draft-strength models are interpreted as draft-class-level evidence.
+
+-   `marginal_lottery_incentive` is our team-specific draft incentive. First, we calculate how much a team's probability of landing a top-four pick would increase if it moved one lottery slot worse. Then we multiply that probability gain by `top4_avg_rating`.
+
+    $$
+    \text{Marginal lottery incentive} =
+    \text{Top-four average rating}
+    \times
+    \text{Marginal top-four-pick probability gain}
+    $$
+
     For example, if moving from the fifth-worst to fourth-worst record increases a team's top-four-pick probability, that gain is more valuable in a year with a stronger top four. Teams with no added top-four-pick probability from moving one slot worse, such as the worst team, receive a marginal incentive of 0.
--   `tanking_index` is the main win-loss outcome. It compares a team's actual March-onward wins to the number of late-season wins expected from its pre-March winning percentage:\
-    `expected late wins = late games x pre_win_pct`\
-    `tanking_index = (expected late wins - actual late wins) / expected standard deviation`.\
+
+-   `tanking_index` is the main win-loss outcome. It compares a team's actual March-onward wins to the number of late-season wins expected from its pre-March winning percentage.
+
+    $$
+    \widehat{W}_{\text{late}} =
+    G_{\text{late}} \times p_{\text{pre}}
+    $$
+
+    $$
+    \text{Tanking index} =
+    \frac{\widehat{W}_{\text{late}} - W_{\text{late}}}
+    {\sqrt{G_{\text{late}}p_{\text{pre}}(1-p_{\text{pre}})}}
+    $$
+
+    Here, $p_{\text{pre}}$ is the team's pre-March winning percentage. The code uses a small lower bound on the denominator for numerical stability.
+
     Positive values mean the team won fewer late-season games than expected. Values near 0 mean it performed about as expected. Negative values mean it overperformed late in the season.
--   `team_fit_score` is an exploratory team-specific measure of whether a team's weaknesses line up with the strengths of that year's draft. We group players and prospects into guards, wings, and bigs. First, we estimate each team's pre-March need by identifying position groups where its production was below the league average. Second, we calculate which position groups contain more high-rated prospects in that draft class. The score is higher when a team's weak position groups match the positions where the draft class is strongest. This is a rough proxy for roster fit, not a team-specific draft board.
--   `core_usage_drop_rate` is an exploratory roster-management outcome. For each team-season, we identify the team's top three pre-March core players by starts, breaking ties by minutes. We keep only core players who appeared for the same team after March 1, so traded players are not counted as "benched." We then calculate their combined minutes per team game before and after March:\
-    `core usage drop rate = (pre-March core MPG - late core MPG) / pre-March core MPG`.\
+
+-   `team_fit_score` is an exploratory team-specific measure of whether a team's weakest position groups match the strongest position groups in that year's draft. We group players and prospects into three position groups: guards, wings, and bigs. For each team-position group before March 1, we calculate a simple production rate:
+
+    $$
+    \text{Value per 36} =
+    36 \times
+    \frac{\text{points} + \text{rebounds} + \text{assists}
+    + \text{steals} + \text{blocks} - \text{turnovers}}
+    {\text{minutes}}
+    $$
+
+    Within each season and position group, we standardize value per 36 across teams. A team gets a positive need score only where it is below average:
+
+    $$
+    \text{Position need}_{g} =
+    \max\left(0,-z(\text{Value per 36}_{g})\right)
+    $$
+
+    We then measure draft supply using the top 35 CraftedNBA prospects. Each prospect's draft value is:
+
+    $$
+    \text{Draft value}_{j} =
+    \max(\text{rating}_{j} - 50, 0)
+    $$
+
+    For each position group, draft value is converted into a share of all top-35 draft value:
+
+    $$
+    \text{Draft value share}_{g} =
+    \frac{\sum_{j \in g}\text{Draft value}_{j}}
+    {\sum_{j}\text{Draft value}_{j}}
+    $$
+
+    The final score is:
+
+    $$
+    \text{Team fit score} =
+    \sum_{g \in \{\text{Guard, Wing, Big}\}}
+    \text{Position need}_{g}
+    \times
+    \text{Draft value share}_{g}
+    $$
+
+    Higher values mean a team was weak at positions where that draft had more high-rated prospects. This is a rough proxy for roster fit, not a team-specific draft board.
+
+-   `core_usage_drop_rate` is an exploratory roster-management outcome. For each team-season, we identify the team's top three pre-March core players by starts, breaking ties by minutes. We keep only core players who appeared for the same team after March 1, so traded players are not counted as "benched." We then calculate their combined minutes per team game before and after March:
+
+    $$
+    \text{Core usage drop rate} =
+    \frac{\text{Pre-March core MPG} - \text{Late core MPG}}
+    {\text{Pre-March core MPG}}
+    $$
+
     Positive values mean the team's main continuing pre-March players were used less after March 1. This does not prove healthy starters were benched; injuries, rest, development minutes, and coaching decisions can also reduce minutes.
+
 -   `season_2012`, `season_2020`, and `season_2021` are separate controls for disrupted seasons. We use separate indicators because the 2012 lockout season, 2020 bubble season, and 2021 shortened COVID-era season may have affected late-season performance in different ways.
 
-The `tanking_index` is the main outcome because it uses more information than a simple cutoff. For example, the 2021 Rockets were 11-21 before March, a .344 win percentage. If they had kept winning at that rate over their 40 March-onward games, they would have been expected to win about 13.8 games. They won 6, leaving a shortfall of 7.8 wins and a tanking index of 2.58. This does not prove intent, but it identifies a large late-season underperformance relative to that team's own earlier baseline. Similarly, if a team's top three continuing core players averaged 95 combined minutes per game before March and 76 after March, its `core_usage_drop_rate` would be `(95 - 76) / 95 = 0.20`, or a 20% drop in core-player usage.
+The `tanking_index` is the main outcome because it uses more information than a simple cutoff. For example, the 2021 Rockets were 11-21 before March, a .344 win percentage. If they had kept winning at that rate over their 40 March-onward games, they would have been expected to win about 13.8 games. They won 6, leaving a shortfall of 7.8 wins and a tanking index of 2.58. This does not prove intent, but it identifies a large late-season underperformance relative to that team's own earlier baseline. Similarly, if a team's top three continuing core players averaged 95 combined minutes per game before March and 76 after March, its core usage drop rate would be:
+
+$$
+\frac{95 - 76}{95} = 0.20
+$$
+
+or a 20% drop in core-player usage.
 
 ## IV. Data Analysis
 
@@ -448,7 +576,7 @@ summary_table <- team_data |>
   )
 
 kable(
-  summary_table,
+  collapse_repeated_rows(summary_table, "Era"),
   digits = 3,
   caption = "Table 1. Summary statistics by lottery era and team group."
 )
@@ -1071,7 +1199,7 @@ core_usage_sensitivity_table <- bind_rows(
 )
 
 kable(
-  interaction_table,
+  collapse_repeated_rows(interaction_table, "Outcome"),
   digits = 3,
   caption = "Table 2. Exploratory pre/post lottery reform interaction models."
 )
@@ -1093,7 +1221,7 @@ The final model uses the full `tanking_index` rather than a binary collapse flag
 
 ```{r final-model-table}
 kable(
-  model_table,
+  collapse_repeated_rows(model_table, "Model"),
   digits = 3,
   caption = "Table 3. Final pooled regression models using position-adjusted draft incentives among likely lottery candidates."
 )
@@ -1105,7 +1233,7 @@ Because 2021 is visibly unusual in the exploratory graphs, we also refit the sam
 
 ```{r no-2021-sensitivity}
 kable(
-  sensitivity_table,
+  collapse_repeated_rows(sensitivity_table, "Outcome"),
   digits = 3,
   caption = "Table 4. Sensitivity check comparing position-adjusted models with models excluding 2021."
 )
@@ -1117,7 +1245,7 @@ Excluding 2021 does not reverse the direction of the estimate. The coefficient h
 
 One peer-review suggestion was to account for whether a draft class fits a particular team's needs. This is a useful idea because a strong draft class may not create the same incentive for every team. For example, a team that badly needs guard creation may respond differently to a guard-heavy draft than to a draft whose best prospects are mostly bigs.
 
-We build a rough `team_fit_score` in two steps. First, we use pre-March player game logs to measure each team's production by position group: guard, wing, and big. Position groups that are below the league average in that season receive higher need scores. Second, we use CraftedNBA prospect positions and ratings to measure how much of each draft class's top-35 prospect value is concentrated in each position group. The final fit score is higher when a team's weak position groups align with the position groups where that draft has more high-rated prospects.
+We build a rough `team_fit_score` by matching team need to draft supply. Team need comes from pre-March production by position group. For guards, wings, and bigs, we calculate each team's `value_per36` using points, rebounds, assists, steals, blocks, turnovers, and minutes. We then standardize that rate within each season-position group, so below-average production becomes a positive need score and above-average production becomes 0 need. Draft supply comes from the top 35 CraftedNBA prospects: we calculate each prospect's positive rating value above 50, sum that value by position group, and convert it to a share of the draft class's top-35 value. The final score multiplies each position group's team need by that position group's draft-value share and sums across guards, wings, and bigs.
 
 This extension is exploratory, so it is not our preferred final model. It is still useful because `team_fit_score` is team-specific and is only weakly correlated with top-four draft rating among likely lottery candidates (`r round(team_fit_correlation, 3)`). In other words, it is not just another version of draft strength.
 
@@ -1148,7 +1276,7 @@ candidate_data |>
 
 ```{r team-fit-table}
 kable(
-  team_fit_table,
+  collapse_repeated_rows(team_fit_table, "Outcome"),
   digits = 3,
   caption = "Table 5. Exploratory models adding team fit and a draft-strength-by-fit interaction."
 )
@@ -1192,7 +1320,7 @@ candidate_data |>
 
 ```{r core-usage-table}
 kable(
-  core_usage_table,
+  collapse_repeated_rows(core_usage_table, "Model"),
   digits = 3,
   caption = "Table 6. Exploratory model predicting late-season core-player usage reduction among likely lottery candidates."
 )
@@ -1204,7 +1332,7 @@ Because this result is stronger than the main win-loss models, we also re-used t
 
 ```{r core-usage-sensitivity-table}
 kable(
-  core_usage_sensitivity_table,
+  collapse_repeated_rows(core_usage_sensitivity_table, "Model"),
   digits = 3,
   caption = "Table 7. Sensitivity checks using core-player usage reduction as the outcome."
 )
