@@ -898,8 +898,66 @@ model_core_usage_top35 <- lm(
   data = candidate_data
 )
 
+cluster_vcov <- function(model, cluster) {
+  X <- model.matrix(model)
+  u <- resid(model)
+  model_rows <- suppressWarnings(as.integer(rownames(model.frame(model))))
+
+  if (all(!is.na(model_rows)) && max(model_rows) <= length(cluster)) {
+    cluster <- cluster[model_rows]
+  } else {
+    cluster <- cluster[seq_along(u)]
+  }
+
+  xtx_inv <- solve(crossprod(X))
+  meat <- matrix(0, ncol(X), ncol(X))
+
+  for (cluster_id in unique(cluster)) {
+    idx <- cluster == cluster_id
+    X_cluster <- X[idx, , drop = FALSE]
+    u_cluster <- u[idx]
+    xu <- crossprod(X_cluster, u_cluster)
+    meat <- meat + xu %*% t(xu)
+  }
+
+  cluster_count <- n_distinct(cluster)
+  obs_count <- nrow(X)
+  parameter_count <- ncol(X)
+  correction <- (cluster_count / (cluster_count - 1)) *
+    ((obs_count - 1) / (obs_count - parameter_count))
+
+  correction * xtx_inv %*% meat %*% xtx_inv
+}
+
+tidy_clustered <- function(model, data, cluster_var) {
+  clustered_vcov <- cluster_vcov(model, data[[cluster_var]])
+  estimate <- coef(model)
+  clustered_se <- sqrt(diag(clustered_vcov))
+  model_rows <- suppressWarnings(as.integer(rownames(model.frame(model))))
+  clusters <- if (all(!is.na(model_rows)) && max(model_rows) <= nrow(data)) {
+    data[[cluster_var]][model_rows]
+  } else {
+    data[[cluster_var]][seq_len(nobs(model))]
+  }
+  cluster_count <- n_distinct(clusters)
+
+  tibble(
+    term = names(estimate),
+    estimate = as.numeric(estimate),
+    std.error = clustered_se,
+    statistic = estimate / clustered_se,
+    p.value = 2 * pt(abs(statistic), df = cluster_count - 1, lower.tail = FALSE)
+  )
+}
+
+season_cluster_p_value <- function(model, data, term_name) {
+  tidy_clustered(model, data, "season") |>
+    filter(term == term_name) |>
+    pull(p.value)
+}
+
 interaction_table <- bind_rows(
-  tidy(model_tanking_index_interaction) |>
+  tidy_clustered(model_tanking_index_interaction, candidate_data, "season") |>
     mutate(Outcome = "Tanking index")
 ) |>
   filter(term %in% c(
@@ -919,10 +977,11 @@ interaction_table <- bind_rows(
     Outcome,
     Term = term,
     Estimate = estimate,
-    `p-value` = p.value
+    `Clustered std. error` = std.error,
+    `Season-clustered p-value` = p.value
   )
 
-interaction_terms <- tidy(model_tanking_index_interaction)
+interaction_terms <- tidy_clustered(model_tanking_index_interaction, candidate_data, "season")
 interaction_pre_slope_est <- interaction_terms |>
   filter(term == "scale(top4_avg_rating)") |>
   pull(estimate)
@@ -1038,51 +1097,6 @@ fit_index_interaction_p <- tidy(model_tanking_index_fit) |>
 fit_index_interaction_est <- tidy(model_tanking_index_fit) |>
   filter(term == "scale(top4_avg_rating):scale(team_fit_score)") |>
   pull(estimate)
-
-cluster_vcov <- function(model, cluster) {
-  X <- model.matrix(model)
-  u <- resid(model)
-  model_rows <- suppressWarnings(as.integer(rownames(model.frame(model))))
-
-  if (all(!is.na(model_rows)) && max(model_rows) <= length(cluster)) {
-    cluster <- cluster[model_rows]
-  } else {
-    cluster <- cluster[seq_along(u)]
-  }
-
-  xtx_inv <- solve(crossprod(X))
-  meat <- matrix(0, ncol(X), ncol(X))
-
-  for (cluster_id in unique(cluster)) {
-    idx <- cluster == cluster_id
-    X_cluster <- X[idx, , drop = FALSE]
-    u_cluster <- u[idx]
-    xu <- crossprod(X_cluster, u_cluster)
-    meat <- meat + xu %*% t(xu)
-  }
-
-  cluster_count <- n_distinct(cluster)
-  obs_count <- nrow(X)
-  parameter_count <- ncol(X)
-  correction <- (cluster_count / (cluster_count - 1)) *
-    ((obs_count - 1) / (obs_count - parameter_count))
-
-  correction * xtx_inv %*% meat %*% xtx_inv
-}
-
-season_cluster_p_value <- function(model, data, term_name) {
-  clustered_vcov <- cluster_vcov(model, data$season)
-  estimate <- coef(model)[term_name]
-  clustered_se <- sqrt(diag(clustered_vcov))[term_name]
-  model_rows <- suppressWarnings(as.integer(rownames(model.frame(model))))
-  clusters <- if (all(!is.na(model_rows)) && max(model_rows) <= nrow(data)) {
-    data$season[model_rows]
-  } else {
-    data$season[seq_len(nobs(model))]
-  }
-  cluster_count <- n_distinct(clusters)
-  2 * pt(abs(estimate / clustered_se), df = cluster_count - 1, lower.tail = FALSE)
-}
 
 core_usage_table <- bind_rows(
   tidy(model_core_usage) |>
@@ -1201,13 +1215,13 @@ core_usage_sensitivity_table <- bind_rows(
 kable(
   collapse_repeated_rows(interaction_table, "Outcome"),
   digits = 3,
-  caption = "Table 2. Exploratory pre/post lottery reform interaction models."
+  caption = "Table 2. Exploratory pre/post lottery reform interaction model with standard errors clustered by season."
 )
 ```
 
 The interaction models were included because feedback suggested testing whether the relationship between draft strength and tanking signals changed after the 2019 lottery reform. They are useful as an exploratory check, but they are not our preferred final model. With only 17 draft-class seasons, splitting the draft-strength effect into pre- and post-reform components makes the model harder to estimate and easier for individual seasons to influence.
 
-The coefficient of interest in Table 2 is the draft-strength slope and its interaction with the post-2019 reform indicator. Because `top4_avg_rating` is standardized, the top-four draft rating coefficient means that, before the reform, a one-standard-deviation increase in top-four draft strength is associated with a `r round(interaction_pre_slope_est, 3)` change in the tanking index, holding pre-March strength and disrupted-season controls fixed. The interaction coefficient of `r round(interaction_change_est, 3)` is the additional post-reform change in that slope, so the implied post-reform slope is `r round(interaction_post_slope_est, 3)`. Since the interaction p-value is `r format.pval(interaction_change_p, digits = 2)`, we do not treat this as strong evidence that the relationship changed after the lottery reform.
+The coefficient of interest in Table 2 is the draft-strength slope and its interaction with the post-2019 reform indicator. Because `top4_avg_rating` is standardized, the top-four draft rating coefficient means that, before the reform, a one-standard-deviation increase in top-four draft strength is associated with a `r round(interaction_pre_slope_est, 3)` change in the tanking index, holding pre-March strength and disrupted-season controls fixed. The interaction coefficient of `r round(interaction_change_est, 3)` is the additional post-reform change in that slope, so the implied post-reform slope is `r round(interaction_post_slope_est, 3)`. Since draft strength is shared by teams in the same season, Table 2 reports standard errors clustered by season. The season-clustered interaction p-value is `r format.pval(interaction_change_p, digits = 2)`, so we do not treat this as strong evidence that the relationship changed after the lottery reform.
 
 ### Analysis 2: Position-Adjusted Team-Season Regression
 
